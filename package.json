@@ -4,6 +4,7 @@
   "type": "module",
   "description": "CUDA semantics notes, verified locally on sm_89",
   "scripts": {
+    "dev": "node tools/dev.mjs",
     "docs:dev": "vitepress dev docs",
     "docs:build": "vitepress build docs",
     "docs:preview": "vitepress preview docs",

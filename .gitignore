@@ -1,0 +1,18 @@
+# ./tmp —— 过程性记忆，默认不进版本库（整个目录）
+/tmp/
+
+# Node / 站点
+node_modules/
+docs/.vitepress/dist/
+docs/.vitepress/cache/
+
+# 构建产物
+build/
+out/
+*.cubin
+*.ptx
+*.exe
+*.obj
+*.o
+*.lib
+*.exp

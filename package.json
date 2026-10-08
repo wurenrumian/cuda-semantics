@@ -1,0 +1,15 @@
+{
+  "name": "cuda-semantics",
+  "private": true,
+  "type": "module",
+  "description": "CUDA semantics notes, verified locally on sm_89",
+  "scripts": {
+    "docs:dev": "vitepress dev docs",
+    "docs:build": "vitepress build docs",
+    "docs:preview": "vitepress preview docs",
+    "runner": "node tools/runner.mjs"
+  },
+  "devDependencies": {
+    "vitepress": "^1.6.4"
+  }
+}

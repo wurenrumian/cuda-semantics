@@ -5,7 +5,7 @@ status: draft
 created: 2026-10-08
 updated: 2026-10-08
 tags: [cuda, semantics, simt, warp, divergence, its, active-mask, sm_89, ada]
-related: ["experiments/EXP-0001-simt-divergence", "docs/plan/cuda-semantics-topic-map.md"]
+related: ["experiments/EXP-0001-simt-execution-model", "docs/plan/cuda-semantics-topic-map.md"]
 ---
 
 # 01 · SIMT 执行模型
@@ -232,4 +232,4 @@ pwsh -File tmp\outputs\D01\run.ps1
    对照：`k_sass` 里同一写法确实生成了显式 `WARPSYNC`。
 4. **可否构造一个非计时的 ITS 可观测演示**：例如早完成的 lane 在 `BSYNC` 之前先写一个标志，让别的 lane 读到——用来把"独立推进只到收敛点"变成可打印的证据。
 5. **反例 A 修正**：`__activemask()` 的一个**正当**用途（cooperative groups "Discovery Pattern"）与本文陷阱的边界，留待域 6（同步原语）交叉。
-6. 与 **EXP-0001** 的重复：本域已把"邻居读竞争 / ITS / `__syncwarp`"做实；EXP-0001（`experiments/EXP-0001-simt-divergence`）可作为同题的更早草稿，待合并或标注关系。
+6. 与 **EXP-0001** 的关系：本域实验即 `experiments/EXP-0001-simt-execution-model/`（源 `d01_simt.cu`），"邻居读竞争 / ITS / `__syncwarp`"已做实，本文证据来自它。

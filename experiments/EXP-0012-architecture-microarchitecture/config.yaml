@@ -1,0 +1,14 @@
+id: EXP-0012
+slug: arch-microarch
+title: 架构 / 微架构相关的语义（ISA 承诺 vs 架构决定）
+arch: sm_89
+build:
+  nvcc: E:\NVIDIA\CUDA\v12.8\bin\nvcc.exe
+  vcvars: E:\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat
+  flags: [-O3, -arch=sm_89]
+tools:
+  cuobjdump: E:\NVIDIA\CUDA\v12.8\bin\cuobjdump.exe
+  sanitizer: E:\NVIDIA\CUDA\v12.8\compute-sanitizer\compute-sanitizer.exe
+params:
+  block_sizes: [128, 256, 384, 512, 640, 768, 1024]
+  smid_grid_blocks_per_sm: 8

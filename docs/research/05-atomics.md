@@ -5,7 +5,7 @@ status: draft
 created: 2026-10-08
 updated: 2026-10-08
 tags: [cuda, semantics, atomics, memory-model, sm_89]
-related: [docs/plan/cuda-semantics-topic-map.md, experiments/EXP-0001-simt-divergence, tmp/outputs/D05]
+related: [docs/plan/cuda-semantics-topic-map.md, experiments/EXP-0005-atomics, tmp/outputs/D05]
 ---
 
 # 域 05 — 原子语义

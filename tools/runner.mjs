@@ -30,9 +30,18 @@ function listExperiments() {
   for (const name of readdirSync(EXP_DIR)) {
     const dir = join(EXP_DIR, name)
     if (!statSync(dir).isDirectory()) continue
-    if (!existsSync(join(dir, 'run.ps1'))) continue
-    out.push({ id: name, name, script: `experiments/${name}/run.ps1` })
+    let script = null
+    for (const rel of ['run.ps1', 'scripts/run.ps1']) {
+      if (existsSync(join(dir, rel))) {
+        script = `experiments/${name}/${rel}`
+        break
+      }
+    }
+    if (!script) continue
+    const id = (name.match(/^(EXP-\d{4})/) || [null, name])[1]
+    out.push({ id, name, script })
   }
+  out.sort((a, b) => a.id.localeCompare(b.id))
   return out
 }
 

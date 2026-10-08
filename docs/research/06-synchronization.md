@@ -7,7 +7,7 @@ updated: 2026-10-08
 tags: [cuda, semantics, synchronization, barrier, syncwarp, named-barrier, mbarrier, sm_89]
 related:
   - docs/plan/cuda-semantics-topic-map.md
-  - experiments/EXP-0002-synchronization/README.md
+  - experiments/EXP-0006-synchronization/README.md
   - tmp/outputs/D06/2026-10-08/
 ---
 
@@ -110,13 +110,13 @@ Function : _Z29k_divergent_syncthreads_alivePiPVi  ; 变体 B
 
 ```powershell
 # 编译 + SASS + 各模式（自旋模式由 host 看门狗判定是否 wedge）
-pwsh -File experiments/EXP-0002-synchronization/scripts/run.ps1
+pwsh -File experiments/EXP-0006-synchronization/scripts/run.ps1
 
 # 手工最小复现
 cmd /c "call E:\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat >nul 2>&1 `
   && E:\NVIDIA\CUDA\v12.8\bin\nvcc.exe -O3 -lineinfo -arch=sm_89 `
      -o tmp\outputs\D06\2026-10-08\sync_demo.exe `
-     tmp\experiments\EXP-0002-synchronization\scripts\sync_demo.cu"
+     experiments\EXP-0006-synchronization\scripts\sync_demo.cu"
 E:\NVIDIA\CUDA\v12.8\bin\cuobjdump.exe -sass tmp\outputs\D06\2026-10-08\sync_demo.cubin
 ```
 

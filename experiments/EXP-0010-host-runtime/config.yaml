@@ -1,0 +1,12 @@
+id: EXP-0010
+slug: host-runtime
+title: 宿主侧运行时 / 启动语义（启动配置、错误传播、stream 顺序、动态并行）
+arch: sm_89
+build:
+  nvcc: E:\NVIDIA\CUDA\v12.8\bin\nvcc.exe
+  vcvars: E:\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat
+  flags: [-O3, -lineinfo, -arch=sm_89]
+  dp_flags: [-O3, -arch=sm_89, -rdc=true, -lcudadevrt]
+tools:
+  sanitizer: E:\NVIDIA\CUDA\v12.8\compute-sanitizer\compute-sanitizer.exe
+modes: [config, peekget, async, streams, props]

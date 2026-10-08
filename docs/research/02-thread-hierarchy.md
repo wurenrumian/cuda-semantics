@@ -7,7 +7,7 @@ updated: 2026-10-08
 tags: [cuda, semantics, thread-hierarchy, scheduling, occupancy, launch-bounds, sm_89]
 related:
   - docs/plan/cuda-semantics-topic-map.md
-  - ../../experiments/EXP-0002-thread-hierarchy/README.md
+  - experiments/EXP-0002-thread-hierarchy/README.md
   - ../../outputs/D02/2026-10-08/
 ---
 

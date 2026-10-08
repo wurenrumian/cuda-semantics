@@ -1,0 +1,16 @@
+id: EXP-0002
+slug: synchronization
+title: 同步原语 —— __syncthreads / __syncwarp / 命名屏障 的边界
+arch: sm_89
+build:
+  nvcc: E:\NVIDIA\CUDA\v12.8\bin\nvcc.exe
+  vcvars: E:\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat
+  flags: [-O3, -lineinfo, -arch=sm_89]
+tools:
+  sanitizer: E:\NVIDIA\CUDA\v12.8\compute-sanitizer\compute-sanitizer.exe
+  cuobjdump: E:\NVIDIA\CUDA\v12.8\bin\cuobjdump.exe
+  ncu: C:\Program Files\NVIDIA Corporation\Nsight Compute 2025.1.0\ncu.bat
+params:
+  block_threads: 256
+  warp_probe_threads: 64
+outputs: tmp/outputs/D06/2026-10-08/

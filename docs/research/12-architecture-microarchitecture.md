@@ -7,7 +7,7 @@ updated: 2026-10-08
 tags: [cuda, semantics, architecture, microarchitecture, sm_89, ada, sass, occupancy, shared-memory, coalescing, sector]
 related:
   - docs/plan/cuda-semantics-topic-map.md
-  - experiments/EXP-0012-arch-microarch
+  - experiments/EXP-0012-architecture-microarchitecture
   - tmp/outputs/D12/2026-10-08/
   - docs/research/01-simt-execution-model.md
   - docs/research/02-thread-hierarchy.md
@@ -19,8 +19,8 @@ related:
 
 > 域内定位：`docs/plan/cuda-semantics-topic-map.md` §12。
 > 目标机：**sm_89（Ada, RTX 4060 Laptop，24 SM）**，**CUDA 12.8**（`nvcc V12.8.61`），driver 596.49。
-> 源码与产物：`experiments/EXP-0012-arch-microarch/`、`tmp/outputs/D12/2026-10-08/`（`arch_probe.out`、`sass_sm_{75,80,89}.txt`、`sass_cpasync_sm89.txt`、`build-*.log`、`coalesce-*.txt`、`ncu-*.txt`）。
-> 一键复现：`pwsh -File tmp\experiments\EXP-0012-arch-microarch\scripts\run.ps1`。
+> 源码与产物：`experiments/EXP-0012-architecture-microarchitecture/`、`tmp/outputs/D12/2026-10-08/`（`arch_probe.out`、`sass_sm_{75,80,89}.txt`、`sass_cpasync_sm89.txt`、`build-*.log`、`coalesce-*.txt`、`ncu-*.txt`）。
+> 一键复现：`pwsh -File experiments\EXP-0012-architecture-microarchitecture\scripts\run.ps1`。
 
 ## 一句话
 
@@ -111,7 +111,7 @@ E:\NVIDIA\CUDA\v12.8\bin\nvcc.exe -O3 -arch=sm_89 -o arch_probe.exe scripts\arch
 arch_probe.exe > arch_probe.out
 ```
 
-一键复现：`pwsh -File tmp\experiments\EXP-0012-arch-microarch\scripts\run.ps1`。
+一键复现：`pwsh -File experiments\EXP-0012-architecture-microarchitecture\scripts\run.ps1`。
 
 ### 观察 A：可查询的架构事实（`arch_probe.out`）
 

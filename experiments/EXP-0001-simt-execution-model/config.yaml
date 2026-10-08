@@ -1,0 +1,13 @@
+id: EXP-0001
+slug: simt-divergence
+title: SIMT 发散 / 独立线程调度 / warp 同步
+arch: sm_89
+build:
+  nvcc: E:\NVIDIA\CUDA\v12.8\bin\nvcc.exe
+  vcvars: E:\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat
+  flags: [-O3, -lineinfo, -arch=sm_89]
+tools:
+  sanitizer: E:\NVIDIA\CUDA\v12.8\compute-sanitizer\compute-sanitizer.exe
+params:
+  threads: 32
+  iters_per_lane: 20000

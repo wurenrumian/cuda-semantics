@@ -1,0 +1,19 @@
+id: EXP-0008
+slug: fp-numerics
+title: 浮点与数值语义（FMA 收缩 / FTZ / fast math / 求和可复现性）
+arch: sm_89
+build:
+  nvcc: E:\NVIDIA\CUDA\v12.8\bin\nvcc.exe
+  vcvars: E:\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat
+  variants:
+    default:  [-O3, -lineinfo, -arch=sm_89]
+    nofmad:   [-O3, -lineinfo, -arch=sm_89, -fmad=false]
+    fastmath: [-O3, -lineinfo, -arch=sm_89, -use_fast_math]
+    ftz:      [-O3, -lineinfo, -arch=sm_89, --ftz=true]
+    debug:    [-G,  -lineinfo, -arch=sm_89]
+tools:
+  sass: E:\NVIDIA\CUDA\v12.8\bin\cuobjdump.exe
+params:
+  threads: 32
+  sum_n: 1048576
+  sum_runs: 5

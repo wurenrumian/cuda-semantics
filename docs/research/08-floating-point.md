@@ -117,7 +117,7 @@ device atomic run 4 : c30e04de  -142.019012
 ## 本机验证（命令 + 观察）
 
 环境：RTX 4060 Laptop（sm_89, Ada），CUDA 12.8（nvcc V12.8.61）。
-源码与脚本：`experiments/EXP-0008-fp-numerics/`（`scripts/fp_demo.cu`、`scripts/run.ps1`）。
+源码与脚本：`experiments/EXP-0008-floating-point/`（`scripts/fp_demo.cu`、`scripts/run.ps1`）。
 产物：`tmp/outputs/D08/2026-10-08/`。
 
 ### 命令

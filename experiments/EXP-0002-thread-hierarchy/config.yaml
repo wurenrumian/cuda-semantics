@@ -1,0 +1,14 @@
+id: EXP-0002
+slug: thread-hierarchy
+title: 线程层次与调度（block 顺序 / occupancy / __launch_bounds__）
+arch: sm_89
+build:
+  nvcc: E:\NVIDIA\CUDA\v12.8\bin\nvcc.exe
+  vcvars: E:\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat
+  flags: [-O3, -lineinfo, -arch=sm_89, -Xptxas, -v]
+tools:
+  sanitizer: E:\NVIDIA\CUDA\v12.8\compute-sanitizer\compute-sanitizer.exe
+  cuobjdump: E:\NVIDIA\CUDA\v12.8\bin\cuobjdump.exe
+params:
+  grid_blocks: 1024
+  block_threads: 128

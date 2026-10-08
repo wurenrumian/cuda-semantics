@@ -1,0 +1,20 @@
+id: EXP-0003
+slug: memory-spaces
+title: 内存空间语义（global / shared / local / register / constant / texture）
+arch: sm_89
+build:
+  nvcc: E:\NVIDIA\CUDA\v12.8\bin\nvcc.exe
+  vcvars: E:\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat
+  cuobjdump: E:\NVIDIA\CUDA\v12.8\bin\cuobjdump.exe
+  flags: [-O3, -lineinfo, -arch=sm_89, -Xptxas, -v]
+tools:
+  sanitizer: E:\NVIDIA\CUDA\v12.8\compute-sanitizer\compute-sanitizer.exe
+params:
+  threads: 32
+  local_reps: 200000
+  chase_reps: 2000000
+  const_reps: 1000000
+  shared_reps: 300000
+  coal_reps: 4000
+  coal_buffer_floats: 8388608
+outputs: tmp/outputs/D03/2026-10-08

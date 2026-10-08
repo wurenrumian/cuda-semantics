@@ -1,0 +1,20 @@
+id: EXP-0009
+slug: async-pipelines
+title: 异步与流水语义（streams / default stream / memcpyAsync / cp.async / CUDA Graph）
+domain: 09
+arch: sm_89
+build:
+  nvcc: E:\NVIDIA\CUDA\v12.8\bin\nvcc.exe
+  vcvars: E:\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat
+  flags: [-O3, -lineinfo, -arch=sm_89]
+  variants:
+    - '-default-stream legacy (ds_legacy.exe)'
+    - '--default-stream per-thread (ds_perthread.exe)'
+tools:
+  cuobjdump: E:\NVIDIA\CUDA\v12.8\bin\cuobjdump.exe
+  sanitizer: E:\NVIDIA\CUDA\v12.8\compute-sanitizer\compute-sanitizer.exe
+params:
+  busy_iters: 60000000
+  ds_iters: 80000000
+  memcpy_bytes: 268435456
+  cp_tile_float4: 256

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// 一条命令同时起：本机 runner(8787) + VitePress dev(5173)。
+// 一条命令同时起：本机 runner(自动选端口) + VitePress dev(5173)。
 // 用法: npm run dev
 import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
@@ -39,7 +39,7 @@ function start(label, args) {
 process.on('SIGINT', () => shutdown(0))
 process.on('SIGTERM', () => shutdown(0))
 
-console.log('[dev] runner -> http://127.0.0.1:8787')
+console.log('[dev] runner -> http://127.0.0.1:<自动选端口，见下方 runner 日志>')
 console.log('[dev] site   -> http://localhost:5173')
 console.log('[dev] Ctrl+C 停止两者')
 

@@ -11,7 +11,14 @@ import { fileURLToPath } from 'node:url'
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const EXP_DIR = join(ROOT, 'experiments')
 const HOST = '127.0.0.1'
-const PORT = Number(process.env.RUNNER_PORT || 8787)
+
+// Windows 会给 Hyper-V/WSL 预留一批动态端口范围，落在其中的端口 listen 会报
+// EACCES（不是 EADDRINUSE，netstat 也看不到占用）。所以不写死单一端口：
+// RUNNER_PORT 指定则只用它；否则按顺序挑第一个能绑上的。前端会探测同一组端口。
+const PORT_CANDIDATES = process.env.RUNNER_PORT
+  ? [Number(process.env.RUNNER_PORT)]
+  : [8787, 8123, 17387, 28123]
+let PORT = PORT_CANDIDATES[0]
 
 /** Only allow localhost origins (the VitePress dev/preview server). */
 function corsFor(origin) {
@@ -91,6 +98,31 @@ const server = http.createServer((req, res) => {
   res.end('not found')
 })
 
-server.listen(PORT, HOST, () => {
-  console.log(`runner listening on http://${HOST}:${PORT}  (experiments dir: ${EXP_DIR})`)
-})
+// 依次尝试候选端口。EADDRINUSE=被占用；EACCES=落在 Windows 保留端口段。
+function listen(ports, i = 0) {
+  const port = ports[i]
+  const onListening = () => {
+    server.removeListener('error', onError)
+    PORT = port
+    console.log(`runner listening on http://${HOST}:${port}  (experiments dir: ${EXP_DIR})`)
+  }
+  const onError = (err) => {
+    server.removeListener('listening', onListening)
+    if (err.code === 'EADDRINUSE' || err.code === 'EACCES') {
+      const why = err.code === 'EACCES' ? '被系统保留（excluded port range）' : '已被占用'
+      if (i + 1 < ports.length) {
+        console.warn(`[runner] ${HOST}:${port} 绑不上（${why}），改试 ${ports[i + 1]}`)
+        return listen(ports, i + 1)
+      }
+      console.error(`[runner] 候选端口都绑不上：${ports.join(', ')}。请设 RUNNER_PORT=<空闲端口> 再试。`)
+    } else {
+      console.error(`[runner] 监听失败：${err.message}`)
+    }
+    process.exit(1)
+  }
+  server.once('error', onError)
+  server.once('listening', onListening)
+  server.listen(port, HOST)
+}
+
+listen(PORT_CANDIDATES)

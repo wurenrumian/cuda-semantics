@@ -99,8 +99,8 @@ tmp/                            # 过程记忆（gitignored：journal/STATE/outp
 - 接口：
   - `GET  /api/experiments` — 列出 `experiments/*/` 中有 `run.ps1` 的实验。
   - `POST /api/run?id=EXP-XXXX` — 在仓库根执行该实验的 `run.ps1`，stdout/stderr **流式**回传（chunked）。
-- 安全边界（因为是本机执行）：**只允许白名单** —— `experiments/` 下、确有 `run.ps1` 的实验；不接受任意路径/命令；仅 `127.0.0.1`；校验 `Origin`；默认端口 `8787`。
-- 前端：VitePress 页面内联 Vue（`<script setup>`）调用 `http://127.0.0.1:8787/api/...`，展示实时输出。
+- 安全边界（因为是本机执行）：**只允许白名单** —— `experiments/` 下、确有 `run.ps1` 的实验；不接受任意路径/命令；仅 `127.0.0.1`；校验 `Origin`；端口从候选列表自动选（`8787` 起，避开 Windows 保留端口段导致的 `EACCES`），可用 `RUNNER_PORT` 强制指定。
+- 前端：VitePress 页面内联 Vue（`<script setup>`）**探测同一组候选端口**后调用 `http://127.0.0.1:<实际端口>/api/...`，展示实时输出。
 - 启动：**只用 npm scripts** —— `npm run runner`（起 runner）、`npm run docs:dev`（起站点）。
 - 访问：**仅本机 `localhost`**。
 

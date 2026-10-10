@@ -9,12 +9,26 @@
 <script setup>
 import { ref, computed, onMounted } from 'vue'
 
-const API = 'http://127.0.0.1:8787'
+// 候选端口需与 tools/runner.mjs 保持一致。runner 会绑定第一个可用的，
+// 这里逐个探测，避免写死端口（Windows 保留端口段会让 8787 绑不上）。
+const PORTS = [8787, 8123, 17387, 28123]
+let API = ''
 const exps = ref([])
 const out = ref('')
 const err = ref('')
 const runningId = ref('')
 const running = computed(() => runningId.value !== '')
+
+async function discover() {
+  for (const p of PORTS) {
+    const base = `http://127.0.0.1:${p}`
+    try {
+      const r = await fetch(`${base}/api/experiments`, { signal: AbortSignal.timeout(1500) })
+      if (r.ok) return base
+    } catch {}
+  }
+  return ''
+}
 
 const CN = ['零', '一', '二', '三', '四', '五', '六', '七', '八', '九', '十', '十一', '十二']
 function num(e) { return Number(e.id.slice(4)) }
@@ -23,12 +37,18 @@ function docLink(e) { return `/research/${String(num(e)).padStart(2, '0')}-${slu
 function label(e) { return `域 ${CN[num(e)] || num(e)} · ${slug(e)}` }
 
 onMounted(async () => {
+  const base = await discover()
+  if (!base) {
+    err.value = `连不上本机 runner（已试 127.0.0.1 端口 ${PORTS.join(' / ')}）。请先运行 \`npm run dev\` 或 \`npm run runner\`，然后刷新本页。`
+    return
+  }
+  API = base
   try {
     const r = await fetch(`${API}/api/experiments`)
     if (!r.ok) throw new Error(await r.text())
     exps.value = await r.json()
   } catch (e) {
-    err.value = '连不上本机 runner（127.0.0.1:8787）。请先运行 `npm run dev` 或 `npm run runner`，然后刷新本页。'
+    err.value = String(e)
   }
 })
 

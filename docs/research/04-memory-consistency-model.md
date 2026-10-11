@@ -20,15 +20,64 @@ related:
 
 CUDA 内存模型是一个**弱序（weakly-ordered）模型**：默认的 `ld`/`st` 既**不承诺原子性**、也**不承诺跨线程顺序或可见性**；要建立 happens-before，必须显式地用**带作用域（scope）和顺序（order）的原子 / 栅栏**——而 `volatile` 不是同步原语。
 
-## 承诺与边界
+## 四个概念，用大白话各说一次
 
-把每个访存/同步动作看成三根正交的轴，才不容易混：
+讨论内存一致性时最容易把四件事搅在一起。先把它们**拆成四个独立问题**：
+
+- **原子性（atomicity）**：*这一次*访问能不能"整体完成，不被撕裂"？
+  比如 64-bit 的写会不会被别人观察到"写了一半"。
+  注意两个层次：**单次访问不撕裂**（64-bit 弱访问在未对齐/某些情况下可能被撕裂）
+  和**读-改-写三步整体是一次原子事务**（atomicAdd 那种 RMW）是两码事——
+  所以"普通 load/store"也不必说成"完全不原子"：对齐的 32-bit 访问在当前硬件上一般不会撕裂，
+  但它没有"读改写一体"的原子性，也没有任何顺序保证。别把这两个层次混成一个词。
+- **顺序（ordering）**：*我这边的*两次访问，别人会不会看到它们**换了次序**？（详见下文 order 标尺）
+- **可见性（visibility）**：*我写的值*要等到什么时候、被什么操作之后，别人才"读得到"？
+  注意 fence **只管顺序、不管可见性**——这是最反直觉的一条（见反例 ③）。
+- **作用域（scope）**：以上三条承诺**向多大范围的人兑现**？只对本 block？整个 GPU？还是连 host 也算？
+  （`block < device < system`。跨 block 至少要 device scope；GPU 与 host/CPU 交互必须 system scope。）
+
+PTX 会说 "morally strong"。翻译成大白话：**两边访问必须"般配"看上去像同一次事务对等发生**——
+同址、至少一方是原子的/强的、作用域覆盖对端。两条访问不般配 → 竞争（UB）。
+术语本身不必背着，记住"**般配才不 race**"这个白话版就够了。
+
+把这四件事放到一张三轴表里（第四件事"作用域"就是其中一根轴）：
 
 | 轴 | 取值 | 管什么 |
 |---|---|---|
 | **强度**（atomicity / morally strong） | weak 访存 / 原子（RMW）/ `volatile` | 这次访问是不是"一次性、不可撕裂"的；并发同址是否被定义为 data race |
 | **作用域**（scope） | `_thread` / `_block` / `_cluster` / `_device` / `_system` | 这次同步能让**哪些线程**观察到顺序效果（`block < device < system`） |
 | **顺序**（order） | `relaxed < acquire / release < acq_rel < seq_cst` | 这次同步给前后的访存**排不排序、怎么排** |
+
+**order 标尺用"通信场景"记，别当成抽象强度**：
+
+| order | 场景 | 一句话 |
+|---|---|---|
+| `relaxed` | 计数器加一，只关心"不丢数"，不传递别的数据 | 只保证这一下不被撕裂，前后的事它不管 |
+| `release`（写在发送方） | 我写完数据、最后按一下"传单已发"的按钮 | **按了这个按钮，按钮之前的所有写都得先到达** |
+| `acquire`（读在接收方） | 我读"传单已发"到达后再读数据 | 读到 flag=1 之后读数据，**一定能读到 release 之前的写** |
+| `acq_rel`（RMW） | 我既收（前面的 flag）也发（要给别人立 flag） | 一边 acquire 一边 release，收发都要 |
+| `seq_cst` | 谁先谁后**全局只有一个真相**，适合复杂的双端协议 | 所有 seq_cst 操作排成一个全序，最贵 |
+
+### producer/consumer 的完整闭环
+
+把 release/acquire 的样子画出来（跨 block 消息传递的标准姿势）：
+
+```text
+生产者 block                          消费者 block
+────────────                          ────────────
+data = 42          ← 普通写
+                 (release) flag = 1   ← 发布点：先于这行的一切写都"打包发送"
+                                          |
+                                          :  （flag 经 L2 可见）
+                                          ↓
+                                     读 flag（acquire）== 1   ← 获取点
+                                     读 data == 42  ✓        ← 保证能读到 42
+```
+
+配对关系像两个钩子：release 和 acquire **必须各一端、且 scope 覆盖对方**，钩子才咬合；
+只有单边（只 fence、或只 relaxed 原子）是空钩子，什么也没挂上。
+
+## 承诺与边界
 
 **承诺：**
 
@@ -46,6 +95,64 @@ CUDA 内存模型是一个**弱序（weakly-ordered）模型**：默认的 `ld`/
 - 不承诺"在某块硬件上没观察出错"：模型给出的是**保证**，不是"本机没复现就安全"（见反例 ④）。
 - 不承诺 `__syncthreads()` 之外的 block 间顺序；block 执行顺序、warp 顺序都不是承诺（见域 2）。
   更不承诺多个 block（或两个 grid）**同时驻留**——所以跨 block 的无界自旋可能永远等不到（见反例 ④）。
+  还有一件事要分开：**内存协议写得对，不等于 kernel 一定能跑完**。就算你的 release/acquire 在纸面上无懈可击，
+  跨 block 自旋仍可能因为调度/驻留问题永远等不到对端（对端 block 根本没被放上 SM），死锁照样发生。
+  协议解决的是"看到什么"，不是"能不能活着看到"——后者是域 2 的驻留/调度问题，见反例 ④ 的讨论。
+
+## 同步机制一览表（谁等人，谁排序）
+
+一次把"等不等人"和"排不排序"分开（这张表要和域 2/6 对照着看）：
+
+| 机制 | 作用域 | 需要双方到场？ | 建立内存顺序？ | 典型用途 |
+|---|---|---|---|---|
+| `__syncwarp(mask)` | warp | 是（mask 里的线程） | 是 | warp 内的写-读交接 |
+| `__syncthreads()` | block | 是（全 block） | 是 | block 内跨 warp 协作 |
+| `__threadfence_block()` | block | 否 | 排序 | block 内顺序约束（不打断执行） |
+| `__threadfence()` | device | 否 | 排序 | device 范围顺序约束 |
+| release/acquire 原子 | 随 scope | 否（配对即咬合） | 配对后是 | 跨 block / 跨 device 发布协议 |
+| `grid.sync()`（cooperative） | 整个 grid | 是（全部 block） | 是 | kernel 内的全局汇合点 |
+| kernel launch 边界 | grid / stream | 是（隐式） | 是 | 最常见的"安全停顿"，多阶段处理 |
+
+读法：**"需要双方到场"的是屏障（等人），"只排序"的是 fence/原子（不等人）**。两者都"建立顺序"，
+但代价和工作方式完全不同——屏障会让线程闲置，fence 只是给前后访存定序。
+
+## 现代写法的最小示意
+
+指南推荐的新风格是 `__nv_atomic_*`（C11 风格、带 scope 的内建）或 libcu++ 的 `cuda::atomic_ref`：
+原子性、顺序、作用域**三件事一次写清**，不再依赖 `volatile` + `__threadfence()` 两件套：
+
+```cpp
+#include <cuda/atomic>
+
+__global__ void consumer(cuda::atomic<int>* flag, int* data, int* out) {
+    // acquire：读到 1 之后，能看到 release 侧之前的所有写
+    while (flag->load(cuda::memory_order_acquire) != 1) {}
+    *out = *data;                        // 保证读到 42
+}
+
+__global__ void producer(cuda::atomic<int>* flag, int* data) {
+    *data = 42;
+    // release：把上面这行"打包发送"，消费者 acquire 读到后即收到
+    flag->store(1, cuda::memory_order_release);
+}
+```
+
+也可以用内建函数版本（同样的语义，不用 include libcu++）：
+
+```cpp
+// data 的写 + RELEASE 语义的 flag 写，作用域 device
+__nv_atomic_store_n(flag, 1, __NV_ATOMIC_RELEASE, __NV_THREAD_SCOPE_DEVICE);
+// 读取侧
+int v = __nv_atomic_load_n(flag, __NV_ATOMIC_ACQUIRE, __NV_THREAD_SCOPE_DEVICE);
+```
+
+与老式 `volatile` + `__threadfence()` 示例的差异：
+
+- 旧风格需要两样东西**拼起来**：`volatile` 把访问变强 + fence 管顺序；两件套里任何一件漏掉都不安全。
+- 新风格一个调用说清三件事（强度、顺序、作用域），编译器也更可能把它落到**单条**既有原子能力的
+  SASS 指令上，而不是"若干访存 + 拦在中间的 MEMBAR"的组合。
+- 反例 ①④ 对比演示过：`volatile int*` 自增会丢更新、`volatile` flag 协议"碰巧对"；换成
+  `cuda::atomic` / `__nv_atomic_*` 后，原子性和顺序都是**语言承诺**，不再依赖运气和本机硬件脾气。
 
 ## 反例
 

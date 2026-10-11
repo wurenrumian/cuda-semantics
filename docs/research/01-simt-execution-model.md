@@ -14,12 +14,41 @@ related: ["experiments/EXP-0001-simt-execution-model", "docs/plan/cuda-semantics
 > 环境：sm_89（Ada, RTX 4060 Laptop）/ CUDA 12.8 / nvcc V12.8.61。
 > 所有观察来自本机实验：源码在 `experiments/EXP-0001-simt-execution-model/scripts/d01_simt.cu`，一键复现用它旁边的 `run.ps1`，产物写到 `tmp/outputs/EXP-0001/2026-10-08/`（本机，未入库）。
 
+## 边界声明
+
+本篇只讲 SIMT 执行模型这一件事：发散（divergence）、active mask、收敛（ITS）和 warp 级协作原语。
+它**不是** CUDA 同步原语总览——`__syncthreads()`、`grid.sync()`、fence、原子这些更大的作用域，
+分别在域 2、4、6 展开。这里只覆盖 warp 这一层。
+
 ## 一句话
 
 **warp 是"调度与指令发射"的单位，不是"32 条线程一起执行"的承诺。**
 同一时刻一个 warp 只发射一条公共指令，靠 **active mask** 决定哪些 lane 参与；发散的路径被**串行**执行。
-Volta+/sm_89 的**独立线程调度（ITS）**让 lane 可以各自推进——但只推进到**下一个收敛点**为止。
+Volta+/sm_89 的**独立线程调度（ITS）**允许 lane 各自推进；在源码层面，lane 大致会推进到控制流的汇合处重新合流——但"早到的 lane 具体停在哪个程序点、按什么顺序等"，属于硬件实现细节，**不是程序语义的承诺**，代码不能依赖它。
 于是，任何"隐式锁步（warp-synchronous）"的假设都是 UB。
+
+## 本篇的分层地图
+
+warp 级的东西容易混成一锅粥，其实是四类完全不同的机制：
+
+| 层 | 机制 | 它到底做什么 |
+|---|---|---|
+| 执行与收敛 | active mask、ITS、`BSSY`/`BSYNC` | 硬件怎么跑发散代码。`BSSY`/`BSYNC` 是**编译器**插的收敛管理，跟内存同步无关 |
+| warp 协作 / 通信 | `__ballot_sync` / `__all_sync` / `__any_sync` / `__shfl_*_sync` / `__match_all_sync` / `__reduce_*_sync` | 在**显式给定 mask** 的线程之间交换数据或运算结果。官方文档原话："do not imply a memory barrier"——它们**不是**内存屏障 |
+| warp 内存同步 | `__syncwarp(mask)` | 唯一一个"等 + 建内存序"都做的 warp 级原语，相当于 `bar.warp.sync` + 内存序 |
+| 状态查询 | `__activemask()` | 只返回"调用那一瞬间谁活跃"的快照，**不能**当逻辑参与 mask（反例 A 就是这么翻车的） |
+
+跨更大作用域的对照（warp ↔ block ↔ grid），见文末「作用域对照表」；同步原语的完整横评在域 6。
+
+## 一张对照表：`__syncwarp()` / `__syncthreads()` / `grid.sync()`
+
+| 机制 | 作用范围 | 谁要到达 | 内存序 |
+|---|---|---|---|
+| `__syncwarp(mask)` | 一个 warp | mask 里（还活着的）线程 | 有（参与线程之间） |
+| `__syncthreads()` | 一个 block | block 内所有未退出的线程 | 有（block 内） |
+| `grid.sync()`（cooperative launch） | 整个 grid | 所有 block 的所有线程 | 有（device 范围） |
+
+记法：**作用范围一层比一层大，三个都是"等人 + 排序"，只是圈的地盘不同。**
 
 ## 承诺与边界
 
@@ -47,6 +76,7 @@ Volta+/sm_89 的**独立线程调度（ITS）**让 lane 可以各自推进——
 - **active mask**：warp 当前指令的参与线程集合。硬件按它屏蔽 lane。
 - **ITS（Volta+, CC≥7.0）**：per-thread PC + 调用栈，线程可在 sub-warp 粒度 diverge/reconverge；调度器把活跃线程重新组成 SIMT 单元。
 - **收敛点**：结构化控制流的分支汇合处，编译器插入 `BSSY`/`BSYNC`（SASS 观察，见下）。早到的 lane 在此**等待**最慢的 lane。
+  要分清两个东西：`BSSY`/`BSYNC` 是**编译器**为管理发散控制流自动生成的，负责"把发散的路径收回来"；`__syncwarp()` 是**程序员**显式写入的同步点，负责"等人 + 建内存序"。前者不等于后者——**控制流收敛了不代表内存也同步了**，反例 C 就是明证。
 - **SASS 对应**：`__activemask()`→`VOTE.ANY`；`__syncwarp()`→`WARPSYNC <mask>`；`__shfl_sync`→`SHFL.IDX`。
 
 ## 反例
@@ -111,6 +141,9 @@ for (int off = 16; off > 0; off >>= 1)
 **谁拥有结果**：只有 **lane 0** 持有 `0+…+31`。lane 31 在最后一步根本不更新（`lane < off` 对所有 `off ≤ 16` 都为假），所以它的 `red[31]` 保持原值 `31`。非 lane 0 的 `red[]` 只是中间值，不应被当成总和读取。
 
 **教训**：跨 lane 的读-改-写**每一步**都需要同步，一次屏障不够；同时必须保证每个读取的下标都在数组内。
+换一个角度说：`__syncwarp()` 能修的只有**阶段之间**的顺序（"上一步写完了，下一步才能读"）；
+它修不了**同一步内部**的读写冲突——写和读撞在同一个 barrier 里，同步发生在它们之后，救不了；
+也更修不了**越界**——那是纯粹的程序 bug，跟同步无关。
 
 ### 反例 C：相邻 lane"写后读"依赖隐式锁步（UB 可能**看起来是对的**）
 
@@ -125,6 +158,10 @@ int n = sh[lane ^ 1];   // 赌"邻居已经写完了"
 **教训**：UB 的表现是"可能看起来对"，不能靠"跑很多次都对"来证明正确；这类旧代码必须补 `__syncwarp()`。
 
 > 本想用 `compute-sanitizer --tool racecheck` 把 A/C 的竞争/掩码问题直接证出来，但**本机 sanitizer 注入失败**（见「未决」）。这里以行为 + SASS 为准。
+
+**一个容易读歪的旁证**：本机某些 kernel 的 SASS 里**看不到** `WARPSYNC`（比如控制流完全收敛时，编译器会把 `__syncwarp()` 消掉，或直接展开成谓词直线代码）。
+这只说明**这一次**编译器证明了收敛、替你省掉了这条指令；**不代表**编程模型取消了同步要求。
+正确读法是：看不到 `WARPSYNC` ≠ 一般情况下不需要 `__syncwarp()`，而是"那位编译器在那一刻能证明你不需要它"。你写代码时还是得按模型要求写。
 
 ### 反例 D（测量陷阱）：以为在发散循环后用 `clock64()` 能量出各 lane 的独立耗时
 

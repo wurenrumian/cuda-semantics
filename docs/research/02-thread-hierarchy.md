@@ -20,20 +20,97 @@ related:
 
 CUDA 只承诺**静态编号**（`threadIdx ⊂ blockIdx`，每维范围固定）和"**block 被放到某个 SM 上执行**"；它**不承诺任何执行顺序**——block 之间、block 内 warp 之间都是"任意顺序、可并行可串行"，占用率是**资源与架构的函数**而非语言承诺。
 
+## 编号公式：从 threadIdx 到全局线程号
+
+先解决一个最低限度的实务问题：多维 `threadIdx` / `blockIdx` 怎么变成一维编号。
+
+- 线性化顺序是 **x 最快、y 其次、z 最慢**（即 `x -> y -> z` 像十进制进位那样）：
+
+```text
+local  tid = threadIdx.x + blockDim.x * (threadIdx.y + blockDim.y * threadIdx.z)
+block  id = blockIdx.x  + gridDim.x  * (blockIdx.y  + gridDim.y  * blockIdx.z)
+```
+
+- 最常见的 1D 写法，一行拿到全局线程号：
+
+```cpp
+// kernel 里（1D grid + 1D block 的常用数据并行写法）
+int gtid = blockIdx.x * blockDim.x + threadIdx.x;   // 全局唯一的 unsigned id
+// 带边界的标准姿势
+int stride = gridDim.x * blockDim.x;
+for (int i = gtid; i < n; i += stride) { /* ... */ }
+```
+
+- **但要注意**：这套公式给出的是**逻辑编号**（"你是第几个人"），不是**执行顺序**。
+  编号 0 的线程不保证先跑，block 0 不保证先启动（见反例 1）。编号只是"贴给你的门牌号"，
+  硬件愿意按什么顺序拜访这些门牌，语言不管。
+
 ## 承诺与边界
 
 | | 承诺（可依赖） | 不承诺（不可依赖） |
 |---|---|---|
 | 编号 | `threadIdx` / `blockIdx` / `blockDim` / `gridDim` 在一次 launch 内是常量；`threadIdx.x` 变化最快地线性化线程（x→y→z） | 编号 → warp → sub-partition 的调度映射 |
 | 执行 | grid 里每个线程都会被执行；一个 block 被调度到某个 SM 上执行 | **block 的启动/完成顺序**（block 0 不一定先跑）；**block 内 warp 的发射顺序**；哪一代 warp 先推进 |
-| 资源 | warp 大小 = 32（ISA 常量）；shared memory 为 block 私有 | 一个 SM 上同时驻留多少 block（由寄存器/shared/线程上限决定）；`%smid` 是稳定的物理 SM 编号 |
-| 同步 | `__syncthreads()` 建立 **block 内**的 happens-before（域 6） | 任何**跨 block** 的顺序或可见性；唯一被承诺的跨 block 屏障是 cooperative launch 的 `grid.sync()`（域 6）。cluster 是 sm_90，本机没有 |
+| 资源 | warp 大小 = 32（历代硬件一致，语言与 ISA 层面也按 32 定型；但它属于"目前如此"的硬件事实，写 KPI 常量时别把它神化）；shared memory 为 block 私有 | 一个 SM 上同时驻留多少 block（由寄存器/shared/线程上限决定）；`%smid` 是稳定的物理 SM 编号 |
+| 同步 | `__syncthreads()` 建立 **block 内**的 happens-before（域 6） | 任何**跨 block** 的顺序或可见性；跨 block 屏障**极少**（见下） |
+
+一个限定：表格里说"跨 block 屏障极少"，而不是一刀切的"唯一"。**当前 CUDA 语言层面**真正被承诺的跨
+block 屏障只有 cooperative launch 的 `grid.sync()`（域 6）；除此以外只能靠 device-scope 原子/fence
+自建协议，或用 sm_90+ 的 cluster（本机不支持）。这是"当前硬件 + 当前规范"的边界描述，不是绝对
+真理——不同代际的工具和硬件已出现过差异，别把它当成 ISA 永久条款。
 
 `__syncthreads()` 还有一个前提：它等价于整块的 `bar.sync 0`，**不带参与者数量**，所以块内所有未退出的线程都必须到达；
 只有一部分线程到达是 UB（实际表现是永久等待）。要只同步一部分线程，得用带 `count` 的命名屏障 `bar.sync id, count`，
-而 `count` 必须是 warp 大小的整数倍。
+而 `count` 必须是 warp 大小的整数倍——也就是说，命名屏障的参与者只能**按 warp 圈**，圈不到半个 warp。
+两者是**不同的工具**：`__syncthreads()` 是"全员点名"的障碍，命名屏障是"多班组各自点各自的"——
+一个 block 里可以有多个不干扰的屏障号（barrier id），各圈各的人。
 
-边界：**host 端 `<<<...>>>` 返回 ≠ kernel 完成**；`cudaDeviceSynchronize()` 之后才有全序。跨 block 的可见性要靠 device-scope 的原子/fence（域 4、5），不是 block-scope 的 `__syncthreads()`。
+**两条 host/device 边界要分清**：
+
+- `<<<...>>>` 返回 ≠ kernel 完成。启动是异步的，launch 调用立刻返回。
+- `cudaDeviceSynchronize()` 是 **host 等待 device**：host 线程在这条调用上睡到 device 上的工作收尾。
+  它不是 device 线程之间的屏障——device 里两个 block 想互助，它帮不上忙。
+  跨 block 的可见性要靠 device-scope 的原子/fence（域 4、5），或 `grid.sync()`。
+
+## 分几条主线读本篇
+
+1. **编号**：上文公式。逻辑门牌号，与执行顺序无关。
+2. **block 调度**：block 以什么顺序被放到 SM 上——答案：任意（反例 1）。
+3. **同步**：block 内有屏障，跨 block 没有（除非 cooperative launch / device-scope 协议）。
+4. **资源与 occupancy**：一个 SM 能同时塞下多少 block，由什么决定——先看反例 2/3 的"三项资源最先到顶"。
+
+## 跨 block 同步有哪些路
+
+| 方案 | 前提 | 一句话评价 |
+|---|---|---|
+| 每个 kernel 只干一件事，kernel 边界做同步（launch 边界天然全序） | 无 | 最简单可靠，代价是两次 kernel 之间的过程丢弃（如果有需要的话） |
+| cooperative launch + `grid.sync()` | 全部 block 同时驻留（需 `cudaLaunchCooperativeKernel`） | 唯一的语言级承诺的跨 block 等待点 |
+| device-scope 原子/fence 自建协议（flag + release/acquire） | 自旋方要留有推进余地，否则可能死锁 | 最灵活，最容易写错；见域 4 反例 ④ |
+| cluster（sm_90+） | 本机不支持 | 分布式 shared memory 跨 8 block；概念上见域 6 |
+
+## occupancy ≠ performance
+
+反例 2/3 讲的是**occupancy（常驻能力）**：一个 SM 上"能"同时住几个 block。
+它是"住得下"的上限，不等于"跑得快"——
+
+- occupancy 只回答"资源够不够"，不回答"这些线程在不在干活"（内存带宽瓶颈时，多驻留也多不出吞吐量）。
+- 有些 kernel 在低 occupancy 下反而更快：寄存器多、spill 少、L1 命中好，单个 warp 的效率能盖过人多。
+- 反例 3 也演示了"买 occupancy 的代价"：压寄存器、触发 48 B spill。这笔账可能赚也可能亏。
+
+正确的用法：把 occupancy 当**排查工具**（"我为什么塞不下更多线程"），别当**优化目标**（"越高越好"）。
+
+### 一个补充：动态 shared memory
+
+反例 2 只测了**静态** `__shared__`。还有一路是 launch 时现分配的动态 shared memory：
+
+```cpp
+k<<<grid, block, dynamicBytes>>>(...);          // host 侧给字节数
+extern __shared__ char smem[];                  // device 侧一块未定型的起始指针
+```
+
+对 occupancy 的账本来说，**静态和动态是同一个池子**：`cudaOccupancyMaxActiveBlocksPerMultiprocessor`
+会把你传的 `dynamicSMemSize` 加到静态占用上一起算。所以在估算常驻块数时，别忘了把动态部分也报进去。
+（`cudaFuncSetAttribute` 提升超过 48 KB 的动态 shared memory 属于配置细节，这里不展开。）
 
 ## 反例
 
@@ -55,7 +132,11 @@ run 2: start==blockIdx? NO | finish==blockIdx? NO | finish==start? NO
 
 三次都**不是** `0,1,2,...`，彼此也不相同，完成顺序又和启动顺序不同。原因：block 一旦**跑完就腾出槽位**，硬件立刻补一个新 block 进去，于是启动顺序被打乱成"随完成滚动"。
 
-**后果**：任何"block 0 当生产者、其余当消费者"的写法都是 UB（不是"读到旧值"，是整个程序无定义）。要做跨 block 同步只能用 cooperative groups `grid.sync()`，或"标志位 + device-scope 原子/fence"自建协议（域 4、5）。
+**后果**：先说清一点——"block 0 当生产者、其它 block 当消费者"这个**分工本身没有任何错**，
+这是完全正常的并行模式。错的是**缺少配合分工的同步和内存顺序**：生产者的写没有被 release 到
+block 范围之外，消费者没有 acquire 就去读，也没有任何屏障保证"生产者先跑完"。三者缺一样，
+"block 0 生产、其余消费"就是 UB（而且不是"读到旧值"，是整个程序无定义）。补救途径见下文
+「跨 block 同步有哪些路」：cooperative groups `grid.sync()`，或"标志位 + device-scope 原子/fence"自建协议（域 4、5）。
 
 ### 反例 2：以为 "并发 block 数只由块内线程数决定"
 

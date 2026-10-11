@@ -20,7 +20,74 @@ related:
 
 CUDA 有六个内存空间（**register / local / shared / global / constant / texture**），每个变量或访存都落在**恰好一个**空间里；这个空间决定了它的**作用域（谁能看见）、生命周期（活多久）、物理落点与访问代价**。而"落在哪个空间"并不完全由源码写法决定——它常常是**编译器按访问模式选的**，只能到 PTX/SASS 层面才能确认。
 
+## 怎么读这张表：四个维度是四件独立的事
+
+表格有四列，先别急着背内容，把四列**为什么是四列**想清楚：
+
+- **作用域（谁能看见）**：回答"这个变量对谁可见"——只有本线程？本 block？整个 grid + host？
+  这是**语义**层面的答案，写代码时就要按它设计。
+- **生命周期（活多久）**：回答"它什么时候出生、什么时候死亡"。thread 级的随线程生灭，
+  block 级的随 block 生灭，`cudaMalloc` 出来的活到你 `cudaFree`。
+- **物理落点（住在哪）**：回答"这份数据字面上放在什么硬件里"——寄存器堆、片上 SRAM、还是 DRAM。
+  这是**实现**层面的事实。关键区别：作用域/生命周期是**承诺**，物理落点常常是**编译器的选择**
+  （尤其 register↔local 的分界），所以承诺和现象要分开记录。
+- **访问代价（多贵）**：取决于前三者 + 访问模式（是否合并、是否 bank conflict、缓存命中）。
+  它不是任何一列的直接函数，**"shared 一定比 global 快"这类结论在它面前统统作废**（见反例 3）。
+
+而表格里"PTX state space / 典型 SASS"两列，对应的是这条编译链：
+
+```text
+源码写法            PTX（NVIR 中间层）         SASS（真机器码）           硬件资源
+────────────       ──────────────────        ─────────────────────     ──────────────
+__shared__ int s   .shared 声明 + ld.shared   LDS / STS                 片上 SRAM
+__device__/堆      .global + ld.global        LDG / STG                 DRAM + L2(+L1)
+（重索引的）数组    .local depot + ld.local    LDL / STL（或被提升→无）   DRAM（经 L1）或寄存器
+                   （或被提升成寄存器）
+
+每一步都可能"变卦"：nvcc 先把源码翻译成 PTX，ptxas 再优化成 SASS。
+源码里的意图只到 PTX 为止；**最终花了多少钱，以 SASS 为准**。
+这就是"落在哪个空间不完全由源码决定"的原因。
+```
+
 ## 承诺与边界
+
+### 三个完整的对照例子
+
+**example 1 — shared**：
+
+```cpp
+__global__ void k() {
+    __shared__ int s[64];          // 源码：block 级共享
+    ...
+    s[threadIdx.x] = v;            // 编译：PTX st.shared → SASS STS
+    // 物理位置：SM 片上 SRAM；作用域：本 block 可见；生命周期：block 存续期
+}
+```
+
+**example 2 — global**：
+
+```cpp
+__global__ void k(int* d) {        // d 来自 cudaMalloc（device DRAM）
+    d[threadIdx.x] = v;            // 编译：PTX st.global → SASS STG
+    // 物理位置：DRAM + L2（通常也过 L1）；作用域：全 grid + host；生命周期：malloc→free
+}
+```
+
+**example 3 — local（最容易想错的一个）**：
+
+```cpp
+__global__ void k(int i) {
+    int arr[64];                   // 源码看起来就是"数组"，没写任何 __local__
+    arr[i] = v;                    // 运行时索引 → 编译器放不下寄存器堆
+    // 编译：PTX .local depot + st.local → SASS STL
+    // 物理位置：DRAM（跟 global 住同一块内存！），只是每线程一段私有、通常走 L1
+    // 注意：如果 i 可证明在界内，ptxas 可能把它整体提升回寄存器 → SASS 里一条 STL 都没有
+}
+```
+
+看到没有：local 的源码里**没有任何标记**，它的落点完全是编译器决定的。
+
+### 四个空间的速查表
 
 | 空间 | 作用域 | 生命周期 | 物理落点（sm_89） | PTX state space | 典型 SASS | 承诺 | 边界 / 不承诺 |
 |---|---|---|---|---|---|---|---|
@@ -35,10 +102,25 @@ CUDA 有六个内存空间（**register / local / shared / global / constant / t
 
 - "空间"是 **作用域 + 生命周期 + 可见性** 的组合，**不是"速度等级"**。shared 与 global 的差别首先是作用域，其次才是代价。
 - **shared 是 block 私有**：既不是 warp 私有，也不是 grid 共享；block 结束即失效，内容不跨 block 传递。
-- **local 是每线程私有，但物理上在 device memory**（= global 所在的那块内存），只是 per-thread 且走 L1。所以 local 流量会和 global 争 L1/L2/DRAM 带宽。
+  换个方向说：**"在同一个 SM 上"不等于"能互相看见 shared"**。一个 SM 上常住着多个 block
+  （这正是 occupancy 的来源），它们各自有**独立的一份** shared memory——shared 的隔离单位是
+  **block**，不是 warp 也不是 SM。两个 block 就算同宿一个 SM，也从对方 shared 里什么也看不见：
+  想跨 block 传数据只能走 global；想省一道数据传递，要么把它们变成同一个 block 里的更多线程。
+- **local 是每线程逻辑私有，但物理上就是 device memory**（与 global 同一块 DRAM），
+  **不是**"每线程一块独占的片上内存"。所以 local 流量会和 global 争 L1/L2/DRAM 带宽。
+- **内存层级长这样**（从近到远）：寄存器 → SM 片上 SRAM（这块要么当 shared，要么当 L1），
+  → **L2（全 device 一个，线程间不区分）** → device DRAM。
+  L2 是**缓存共享**：block A 写过的数据若被 block B 读到，多半是经 L2 完成的——
+  但**缓存共享 ≠ 线程同步**。缓存只解决"数据在那里"，不解决"读到的是不是最新写入"：
+  顺序与可见性（什么时候可以放心读）要靠域 4 讲的 fence / 原子 / 屏障来建立。
 - **register ↔ local 的分界由编译器定**：数组一旦用运行时索引通常被迫进 local，但若索引"可证明在界内"，ptxas 会把 local 数组**提升回寄存器**。
 - **未经 `__syncthreads()` 的 shared 跨线程读**不是"可能读到旧值"，而是**数据竞争（UB）**（域 4/6）。
 - **constant 的"广播"只对 uniform 地址成立**；每 lane 不同地址会退化成串行访问。
+  另注意两处局限：constant 走的是**专门的常量缓存通路**（`LDC/ULDC`），不是普通 load 的路径；
+  广播优化是否生效还与**工具链版本和架构**相关，同一份 PTX 在不同代际可能落不同的 SASS。
+  texture/read-only 同理：它走 `__ldg` / `ld.global.nc` 的**只读缓存通路**，需要编译器
+  能**证明**"这块内存在 kernel 里没人写"（`__ldg` 显式说、`const __restrict__` 让编译器推），
+  才切换通路——不是你"想要只读就能用只读通道"。
 - 向量类型（`float4` 等）与**对齐**影响合并访问；现代 GPU 的合并粒度是 **32B sector**（域 12）。
 
 ## 反例

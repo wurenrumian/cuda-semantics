@@ -21,11 +21,16 @@ __global__ void deref_null(int *p) { *p = 123; }
 
 __global__ void set_flag(volatile int *f) { *f = 1; }
 
-// Spin until *flag != 0 or the iteration budget runs out.
-// Writes  1  if it observed the flag,  0  if it timed out.
-__global__ void spin_wait(volatile int *flag, int *out, long long limit) {
-  long long i = 0;
-  while (*flag == 0 && i < limit) ++i;
+// Spin until *flag != 0, or until a wall-clock budget expires.
+// The budget is measured with clock64() (the SM clock), so the spin is bounded
+// in TIME rather than in iteration count: a spin that is never woken must time
+// out quickly instead of hanging (the "blocking" case below relies on exactly
+// that timeout).  Writes the last observed value of *flag: 1 if set_flag won
+// the race, 0 if the wait gave up.
+__global__ void spin_wait(volatile int *flag, int *out,
+                          long long timeout_cycles) {
+  long long start = clock64();
+  while (*flag == 0 && (clock64() - start) < timeout_cycles) {}
   *out = (int)(*flag);
 }
 
@@ -72,12 +77,15 @@ static void mode_streams() {
   int *dflag = nullptr, *dout = nullptr;
   cudaMalloc(&dflag, sizeof(int));
   cudaMalloc(&dout, sizeof(int));
-  const long long limit = 2000000000LL;   // ~seconds of spinning if never woken
+  // ~0.1 s at ~2 GHz (and still < ~1 s at an idle low clock): far longer than
+  // the few microseconds a concurrent set_flag needs to land, yet short enough
+  // that the serialized ("blocking") case just times out and moves on.
+  const long long timeout_cycles = 200000000LL;
 
   // (a) "default" (blocking) stream: it must wait for the prior legacy-default
   //     work (the spin), so the flag can only be set AFTER the spin gives up.
   cudaMemset(dflag, 0, sizeof(int));
-  spin_wait<<<1, 1>>>(dflag, dout, limit);            // legacy default stream
+  spin_wait<<<1, 1>>>(dflag, dout, timeout_cycles);   // legacy default stream
   cudaStream_t sb;
   cudaStreamCreateWithFlags(&sb, cudaStreamDefault);  // "blocking"
   set_flag<<<1, 1, 0, sb>>>(dflag);
@@ -89,7 +97,7 @@ static void mode_streams() {
 
   // (b) non-blocking stream: no implicit dependency -> runs concurrently.
   cudaMemset(dflag, 0, sizeof(int));
-  spin_wait<<<1, 1>>>(dflag, dout, limit);            // legacy default stream
+  spin_wait<<<1, 1>>>(dflag, dout, timeout_cycles);   // legacy default stream
   cudaStream_t snb;
   cudaStreamCreateWithFlags(&snb, cudaStreamNonBlocking);
   set_flag<<<1, 1, 0, snb>>>(dflag);

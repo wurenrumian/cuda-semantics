@@ -3,7 +3,7 @@ title: 指令级 / PTX 语义
 type: research
 status: draft
 created: 2026-10-08
-updated: 2026-10-08
+updated: 2026-10-11
 tags: [cuda, semantics, ptx, sass, instruction-level, cache-operator, ldg, restrict, sm_89]
 related:
   - INTENT.md
@@ -13,8 +13,8 @@ related:
 # 域 07 — 指令级 / PTX 语义
 
 > 目标机：**sm_89 (Ada, RTX 4060 Laptop) / CUDA 12.8**。
-> 本文只回答一个问题：**PTX/SASS 指令层到底向程序员承诺了什么、不承诺什么。
-> 所有关键论断配 `tmp/outputs/D07/` 下的最小实测。
+> 本文只回答一个问题：**PTX/SASS 指令层到底向程序员承诺了什么、不承诺什么。**
+> 所有关键论断都配了 `tmp/outputs/D07/2026-10-08/` 下的最小实测。
 
 ## 一句话
 
@@ -39,7 +39,7 @@ PTX 的访存指令把"访存"拆成三个**正交**旋钮——**序（order）
 
 ### 2. sm_89 上的实测映射（PTX → SASS）
 
-用 `nvcc -arch=sm_89 -ptx` / `-cubin` + `cuobjdump -sass` 得到（见 `tmp/outputs/D07/06_ptx_cache.*`）：
+用 `nvcc -arch=sm_89 -ptx` / `-cubin` + `cuobjdump -sass` 得到（见 `tmp/outputs/D07/2026-10-08/06_ptx_cache.*`）：
 
 | PTX | SASS (sm_89) |
 |---|---|
@@ -57,13 +57,13 @@ PTX 的访存指令把"访存"拆成三个**正交**旋钮——**序（order）
 
 两个反直觉点：
 - **默认 `ld.global` 与显式 `ld.global.ca` 的 SASS 不同**（`LDG.E` vs `LDG.E.STRONG.SM`），尽管 `.ca` 文档上就是默认缓存策略。说明 SASS 后缀编码的**不止缓存策略**。
-- **`ld.global.lu` 在全局地址上按文档应表现为 streaming（≈ `.cs`）**，但 SASS 给的是 `LDG.E.LU`（而 `.cs` 给 `LDG.E.EF`）。SASS 后缀并不是 PTX 语义的 1:1 翻译。
+- **`ld.global.lu` 在全局地址上按文档应表现为 streaming（≈ `.cs`）**，但 SASS 给的是 `LDG.E.LU`（而 `.cs` 给 `LDG.E.EF`）。PTX ISA 的原话是："The `ld.lu` instruction performs a load cached streaming operation (`ld.cs`) on global addresses."（§9.7.9.1）——即**文档说二者等价，SASS 却给不同后缀**。这说明 SASS 后缀并不是 PTX 语义的 1:1 翻译（见「未决」4）。
 
 ### 3. 边界（哪些不能依赖）
 
 - `__restrict__` / `const` / `__ldg` 是**对编译器的承诺**（CUDA C++ Guide §7.2.6 / §7.10）。违反 = UB；编译器**有权**把 load 外提、CSE、甚至删除——运行期表现为"读到旧值"，而不是报错。
 - cache operator 不会让脏数据变干净。`.ca` 明确写着："多个 L1 对 global 数据**不**一致；可能读到 stale L1 数据"（PTX ISA §9.7.9.1）。
-- `volatile` 只保**指令数**不被删，不保**序**、不保**原子**（PTX ISA §8.4.2）。
+- `volatile` 只保**指令数**不被删/合并，**不建立 acquire/release 同步**——它本质上是 **system-scope 的 relaxed 操作**，跨线程不带 happens-before（PTX ISA §8.4.2）。
 - 无同步的全局访存，编译器可以自由重排/消除——"能通过 SASS 看到它被删了/挪走了"正是本文反例的来源。
 
 ## 反例（想当然会错）
@@ -73,7 +73,7 @@ PTX 的访存指令把"访存"拆成三个**正交**旋钮——**序（order）
 "读-写-再读，第二次一定读到新值" —— 错。给编译器 `__restrict__` 承诺后，它会认为对 `q` 的写
 **不可能影响 `p`**，于是把第二次 `p[0]` 直接复用成第一次的寄存器值。
 
-`tmp/outputs/D07/04_restrict_alias.cu`，令 `q` 与 `p` 实际指向同一块内存：
+`experiments/EXP-0007-ptx-instruction-level/scripts/04_restrict_alias.cu`，令 `q` 与 `p` 实际指向同一块内存：
 
 ```cpp
 __global__ void alias_break(float* q, const float* __restrict__ p, float* out) {
@@ -155,9 +155,11 @@ nvcc -arch=sm_89 -O3 -cubin x.cu -o x.cubin
 cuobjdump -sass x.cubin > x.sass
 ```
 
-一键复现：`tmp/outputs/D07/run.ps1`（编译 6 个源文件并运行）。
+一键复现：`experiments/EXP-0007-ptx-instruction-level/scripts/run.ps1`（编译 6 个源文件并运行）。
 
 ### 观察清单
+
+源码在 `experiments/EXP-0007-ptx-instruction-level/scripts/`；下面的 `.ptx` / `.sass` 产物在 `tmp/outputs/D07/2026-10-08/`。
 
 | # | 文件 | 观察 |
 |---|---|---|
@@ -165,7 +167,7 @@ cuobjdump -sass x.cubin > x.sass
 | 02 | `02_strong_vs_weak.cu/.ptx/.sass` | `ld.acquire.gpu` / `st.release.gpu` / `ld.volatile` / `cuda::atomic_ref` (acquire/release) / `seq_cst` 各自的 PTX 与 SASS |
 | 03 | `03_ldg_vs_plain.cu/.sass` | `__ldg` ≡ `const __restrict__` 普通加载；`dead_load` 无 LDG；`hoist` 只有 1 条 LDG |
 | 04 | `04_restrict_alias.cu/.sass` | **反例 1**：restrict 版 after=旧值，普通版 after=新值 |
-| 05 | `05_inline_ptx.cu/.sass` | inline PTX：`%laneid`→`S2R R5, SR_LANEID`，`%clock64`→`CS2R SR_CLOCKLO`，`bar.sync`→`BAR.SYNC` |
+| 05 | `05_inline_ptx.cu/.sass` | inline PTX：`%laneid`→`S2R R5, SR_LANEID`，`%clock64`→`CS2R SR_CLOCKLO`，`bar.sync`→`BAR.SYNC`（本机为 `BAR.SYNC.DEFER_BLOCKING`） |
 | 06 | `06_ptx_cache.cu/.sass` | 直接写 PTX cache op，排除 intrinsic 干扰，得到上面的映射表 |
 
 ### 关键运行输出
@@ -184,12 +186,18 @@ cuobjdump -sass x.cubin > x.sass
   `MEMBAR.SC.SYS` + `LD.E.STRONG.SYS` + `CCTL.IVALL`；而 `acquire/release (gpu)` 是 `LD.E.STRONG.GPU`
   / `MEMBAR.ALL.GPU` / `ST.E.STRONG.GPU`。（`02_strong_vs_weak.sass`）
 - **inline PTX 的 `memory` clobber 不能省**：`05` 里的 `fake_fence` 故意用
-  `asm volatile("bar.sync 0;" ::: )`（无 `"memory"`）做"屏障"，是错误的写法——它不会告诉编译器
-  访存依赖，编译器仍可重排/消除其周围的访存。正确写法应带 `: "memory"` 或直接用 `__syncthreads()`。
+  `asm volatile("bar.sync 0;" ::: )`（缺 `"memory"`）冒充屏障，这是错的。`bar.sync` 在硬件层面
+  确实是 CTA 内的屏障，但内联汇编没有 `"memory"` clobber 时，编译器**不知道**这条汇编会读写内存，
+  于是可以把它前后的访存重排、合并甚至删掉——屏障语义被编译器直接绕过。正确写法要带 `: "memory"`，
+  或干脆用 `__syncthreads()`。
+  这里要如实说明的是：在这个最小例子里（单线程，且三个指针都是普通 `int*`，编译器必须假设它们可能
+  互为别名），实测 SASS 恰好是"存 `*data` → `BAR.SYNC` → 读 `*flag`"，**并没有真的乱序**。所以这里的
+  错属于**契约层面**——代码**允许**编译器乱序，只是这次没触发；换成不别名、或只读的 `__restrict__`
+  指针，乱序就可能真的出现。
 
 ## 出处
 
-**CUDA C++ Programming Guide 12.8**（在线 HTML 版章节号，PDF 版为 §10.11 系列）：
+**CUDA C++ Programming Guide 12.8**（下列是**在线 HTML 版**的章节号；**PDF 版**编号不同，例如本节的 §7.10 `__ldg` 在 PDF 里是 §10.10）：
 - §7.10 Read-Only Data Cache Load Function（`__ldg`）
 - §7.11 Load Functions Using Cache Hints（`__ldcg/__ldca/__ldcs/__ldlu/__ldcv`）
 - §7.12 Store Functions Using Cache Hints（`__stwb/__stcg/__stcs/__stwt`）

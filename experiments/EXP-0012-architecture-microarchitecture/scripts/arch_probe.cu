@@ -66,8 +66,10 @@ int main() {
   printf("\n==== cudaFuncGetAttributes(k_tiny) ====\n");
   cudaFuncAttributes a;
   CHECK(cudaFuncGetAttributes(&a, k_tiny));
+  // NOTE: cudaFuncAttributes::maxDynamicSharedSizeBytes is `int` (not size_t),
+  // so it must be printed with %d; the other two byte counts are size_t.
   printf("numRegs=%d sharedSizeBytes=%zu maxThreadsPerBlock=%d "
-         "maxDynamicSharedSizeBytes=%zu localSizeBytes=%zu\n",
+         "maxDynamicSharedSizeBytes=%d localSizeBytes=%zu\n",
          a.numRegs, a.sharedSizeBytes, a.maxThreadsPerBlock,
          a.maxDynamicSharedSizeBytes, a.localSizeBytes);
 

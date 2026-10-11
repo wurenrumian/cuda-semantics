@@ -3,7 +3,7 @@ title: 域 06 —— 同步原语（__syncthreads / __syncwarp / 命名屏障）
 type: research
 status: draft
 created: 2026-10-08
-updated: 2026-10-08
+updated: 2026-10-11
 tags: [cuda, semantics, synchronization, barrier, syncwarp, named-barrier, mbarrier, sm_89]
 related:
   - docs/plan/cuda-semantics-topic-map.md
@@ -14,11 +14,11 @@ related:
 # 域 06 —— 同步原语
 
 > 环境：sm_89（Ada, RTX 4060 Laptop）/ CUDA 12.8（nvcc V12.8.61）/ driver 596.49。
-> 本机实验：`EXP-0002`，产物 `tmp/outputs/D06/2026-10-08/`。
+> 本机实验：`EXP-0006`（`experiments/EXP-0006-synchronization/`），产物 `tmp/outputs/D06/2026-10-08/`。
 
 ## 一句话
 
-同步原语是**「到达 + 可见性」的约定**：一个 barrier 只承诺**它名下、且尚未退出（non-exited）的那些线程**到达之后，它们在屏障前对 shared/global 的访问彼此可见；它**不承诺**谁会来、也不跨越 block。Volta+（含 sm_89）逐线程执行，理解"non-exited"三个字是本域的关键。
+同步原语本质上是**一个「到达 + 可见性」的约定**：屏障只对它名下、且**尚未退出（non-exited）**的线程负责——等这些线程都到达之后，它们在屏障前对 shared/global 的访问才彼此可见。它**不承诺**谁会到达，也**不跨 block**。从 Volta 起（含 sm_89）线程是逐线程执行的，所以"尚未退出的线程（non-exited threads）"这个概念是本域的关键。
 
 ## 承诺与边界
 
@@ -28,7 +28,7 @@ related:
 |---|---|---|---|---|
 | `__syncthreads()` | `BAR.SYNC 0`（= `bar.sync 0`，无 count） | block（CTA） | 本 CTA **所有未退出的线程** | 屏障前本线程对 **shared + global** 的访问，对**本 block 所有线程**可见 |
 | `__syncwarp(mask)` | `WARPSYNC <mask>` | warp | `mask` 中**未退出的 lane** | 参与线程之间的内存序（可写 shared → syncwarp → 读） |
-| `__syncthreads_count/and/or(p)` | `BAR.SYNC 0` + 归约 | block | 同 `__syncthreads` | 同 `__syncthreads`，另返回全块归约值 |
+| `__syncthreads_count/and/or(p)` | `BAR.RED.POPC/AND/OR`（屏障 + 归约融合，SASS 实测） | block | 同 `__syncthreads` | 同 `__syncthreads`，另返回全块归约值 |
 | `bar.sync id, count`（内联 PTX，命名屏障） | `BAR.SYNC id, count` | block，`id∈0..15` | 该屏障上到达 `count` 个线程（count 为 warp 倍数） | 同 CTA 范围 |
 | cooperative groups `tiled_partition` | 内部用命名屏障（>32 时） | tile | tile 内 | tile 内 |
 | `grid.sync()`（`this_grid()`） | grid 屏障 | **整 grid** | 全部 block（需 cooperative launch） | grid 内 |
@@ -75,16 +75,18 @@ __global__ void k_alive(int *out, volatile int *spin) {
 }
 ```
 
-本机实测（256 线程，sm_89）：
+变体 B 里的自旋是**故意**写的：`*spin` 永远是 0，那半个 block 就永远卡在 `while` 里、永远到不了屏障——这是一个**故意构造、永不终止**的演示，专门用来展示"发散屏障会卡死"，不是代码缺陷。变体 A 则相反，没到屏障的线程直接 `EXIT`。
+
+本机实测（256 线程，sm_89；`-alive` 由 exe 内置看门狗兜底——轮询 50 次 × 10 ms，**截止 ~0.5 s**，实测打印 0.76–0.78 s 判定 wedge，随后 `_exit(0)`，全程不挂 GPU、不挂 shell）：
 
 | 变体 | 结果 |
 |---|---|
 | A（EXIT） | **FINISHED** —— 屏障照样满足，看起来"没问题" |
-| B（自旋） | **WEDGED** —— 5 秒仍未完成，块被卡死 |
+| B（自旋） | **WEDGED** —— 看门狗轮询期内 kernel 一直未完成（实测 0.76–0.78 s 判定），块被卡死 |
 
 `__syncwarp()` 同构：`if (lane<16) __syncwarp();` 且另一半 EXIT → **FINISHED**；另一半自旋 → **WEDGED**。
 
-根因在 PTX/编程指南的措辞里：屏障等的是 **all non-exited threads**。已退出的线程被从计数里去掉，所以 A 不挂；**但"条件是否在整块/整 warp 上一致"依旧是 UB 的前提**——A 只是碰巧没暴露。危害正是：**同一段错误代码，用一个只做一点工作的 `else` 就"测过了"，换成一个真实耗时的 `else`（或后续版本）就挂。**
+根因在 PTX / 编程指南的措辞里：屏障等的是 **all non-exited threads**（所有尚未退出的线程）。已退出的线程会被从计数里去掉，所以 A 不挂；**但"条件是否在整块 / 整 warp 上一致"仍是 UB 的前提**——A 只是碰巧没暴露而已。真正的危害在于：**同一段错误代码，`else` 只做一点点工作时就"测过了"，一旦换成真正耗时的 `else`（或到了下一版），就会挂死。**
 
 SASS 对照（`cuobjdump -sass`）：
 
@@ -109,7 +111,9 @@ Function : _Z29k_divergent_syncthreads_alivePiPVi  ; 变体 B
 构建/运行（先 `vcvars64.bat`，再 `nvcc -arch=sm_89`）：
 
 ```powershell
-# 编译 + SASS + 各模式（自旋模式由 host 看门狗判定是否 wedge）
+# 编译 + SASS + 各模式。带 -alive 的自旋模式是故意的永不终止演示：
+# exe 内置 host 看门狗（~0.5 s 截止，打印实测秒数）判定 wedge 后退出，
+# run.ps1 再给每次运行套 30s 硬超时，所以脚本不会永久挂住。
 pwsh -File experiments/EXP-0006-synchronization/scripts/run.ps1
 
 # 手工最小复现
@@ -127,17 +131,20 @@ E:\NVIDIA\CUDA\v12.8\bin\cuobjdump.exe -sass tmp\outputs\D06\2026-10-08\sync_dem
 | `__syncthreads()` | `BAR.SYNC.DEFER_BLOCKING 0x0` |
 | `bar.sync 2,128` / `bar.sync 1,128` | `@P0 BAR.SYNC.DEFER_BLOCKING 0x2, 0x80` / `@!P0 BAR.SYNC.DEFER_BLOCKING 0x1, 0x80`（id=2/1，count=0x80=128） |
 | `__syncwarp()` | `WARPSYNC 0xffffffff`（发散处还有 `BRA.CONV` 收敛分支；屏障前常插 `WARPSYNC`） |
+| `__syncthreads_count/and/or(p)` | `BAR.RED.POPC/AND/OR.DEFER_BLOCKING 0x0, !P0 或 P0`（屏障与归约是同一条指令；谓词极性跟随上游 ISETP：条件 `threadIdx.x<16` 实测为 `!P0`，条件 `threadIdx.x%2` 实测为 `P0`） |
 
 结论：`__syncthreads` 就是无 count 的 `bar.sync 0`；`__syncwarp` 就是 `WARPSYNC mask`；命名屏障在 SASS 里显式带 `id, count`。
+
+> 末行（`BAR.RED.*`）由单独探针（`__syncthreads_count/and/or` 各一个 kernel）编译确认，未包含在 `sync_demo.cu` 里；谓词不是固定极性，`!P0` / `P0` 两种（随源码条件变化）都各自实测过。
 
 ### 观察 2：行为（`run-*.txt`）
 
 | 模式 | 观察 |
 |---|---|
 | `divergent-syncthreads` | `FINISHED`（另一半 EXIT） |
-| `divergent-syncthreads-alive` | `WEDGED — still running after ~5 s` |
+| `divergent-syncthreads-alive` | `WEDGED — kernel still unfinished after 0.76–0.78 s`（看门狗实测打印） |
 | `divergent-syncwarp` | `FINISHED` |
-| `syncwarp-partial-alive` | `WEDGED — still running after ~5 s` |
+| `syncwarp-partial-alive` | `WEDGED — kernel still unfinished after 0.78 s`（看门狗实测打印） |
 | `named-barrier` | `group0 correct 128/128`（两组各用 `bar.sync 1/2,128` 独立同步） |
 | `smem-order-sync` | 0/256 错值（屏障建立 block 内可见性） |
 | `smem-order-unsync` | 0/256 错值 —— **竞争"看起来正确"**，正是 racecheck 存在的理由 |
@@ -163,7 +170,7 @@ $ compute-sanitizer --tool racecheck sync_demo.exe smem-order-unsync
 ========= Error: Target application terminated before first instrumented API call
 ```
 
-同机 `ncu` 能 attach 但计数器被拒：`ERR_NVGPUCTRPERM`。两者都需要**管理员 / 计权限**，当前用户非管理员（`IsAdmin=False`）；`EnableDebuggerInterface` 注册表项已为 1。故 racecheck/synccheck 的"工具判词"留待有权限环境复核（探针见 `_sanitizer-probe/`）。本节的正确性论断用 **行为了 + SASS** 独立佐证，未依赖 sanitizer。
+同机 `ncu` 能 attach，但计数器被拒：`ERR_NVGPUCTRPERM`。两者都需要**管理员权限 / 性能计数器权限**，而当前用户不是管理员（`IsAdmin=False`；`EnableDebuggerInterface` 注册表项已为 1）。所以 racecheck / synccheck 的"工具判词"只能留待有权限的环境复核（探针见 `_sanitizer-probe/`）。本节的所有正确性论断都用**行为观察 + SASS** 独立佐证，不依赖 sanitizer。
 
 > 产物：`tmp/outputs/D06/2026-10-08/`（`sass-key.txt`、`run-*.txt`、`ptxas-badsync.txt`、`_sanitizer-probe/`）。
 
@@ -184,7 +191,8 @@ $ compute-sanitizer --tool racecheck sync_demo.exe smem-order-unsync
 ## 未决
 
 - **`compute-sanitizer` 本机不可用**（非管理员 / 权限）。需要：以管理员运行，或配置 GPU 性能计数器/调试权限，再复核 `racecheck`（shared-memory hazard）与 `synccheck`（发散屏障 / barrier 误用）。当前结论靠行为 + SASS。
-- 反例 A"EXIT 就不挂"是否可视为**实际安全**？文档层面仍是 UB（条件非一致）。本稿按 **UB 处理**，不鼓励依赖；若想要"部分线程提前退出仍安全"的写法，应改为 uniform 条件或 `__syncwarp(__activemask())` / 正确的 `mask`。
+- 反例 A"EXIT 就不挂"是否可视为**实际安全**？文档层面仍是 UB（条件在整块上并不一致）。本稿按 **UB 处理**，不鼓励依赖。若确实只让一部分 lane 参与 warp 同步，正确写法是给 `__syncwarp` 传一个**明确的、恰好覆盖这些 lane 的 `mask`**——不要用 `__activemask()` 现算（它只反映调用瞬间的活跃 lane，不保证涵盖将来才会加入的线程，因此不能用来重新收敛）。
+- **WEDGED 的可复现性**：本机观察到的是"看门狗轮询（实测 ~0.76–0.78 s）期间 kernel 仍未完成"，消息里打印的是**实测秒数**；若某台机器启用了 Windows 的 TDR（GPU 超时恢复，默认约 2s），同样的自旋内核可能被驱动直接掐断，此时 `cudaStreamQuery` 会返回错误、程序打印"kernel aborted"而非 WEDGED。两种表现都是"发散屏障得不到满足"，但脚本观察到的文字会不同。
 - **命名屏障资源与 occupancy**：`tiled_partition` >32 会占用命名屏障，16 个上限如何影响 residency —— 待实测/查证。
 - **`cuda::barrier` / `mbarrier`**：仅概念了解，尚未在本机跑最小例（sm_89 支持 mbarrier + `cp.async`，留待域 9）。
 - **grid.sync()**：本机单卡可做 cooperative launch 最小验证，未跑。

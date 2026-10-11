@@ -22,7 +22,7 @@ done（2026-10-08 首轮）
 | `config`   | `<<<0,256>>>` / `<<<1,2000>>>` / `<<<1,32,200000>>>` | 非法配置是否**当场**报错 |
 | `peekget`  | 制造一次 launch 错误，反复 peek / get | peek 不清、get 清 |
 | `async`    | `deref_null<<<1,1>>>(nullptr)` | launch 后是否 success；错误何时出现、清了是否还在 |
-| `streams`  | 自旋 kernel（default stream）+ 写标志位（blocking vs non-blocking stream） | default stream 是否隐式串行 |
+| `streams`  | 自旋 kernel（default stream，带 `clock64()` 时间上限）+ 写标志位（blocking vs non-blocking stream） | default stream 是否隐式串行 |
 | `props`    | 打印 `cudaDeviceProp` 启动相关字段 | 本机硬边界 |
 
 另有：
@@ -30,11 +30,13 @@ done（2026-10-08 首轮）
 - `scripts/dp_parent.cu` —— 父 kernel 启动子 kernel（动态并行），验证 `-rdc=true -lcudadevrt` 边界。
 - `scripts/launchbounds.cu` —— `__launch_bounds__(256,2)` → PTX `.maxntid` / `.minnctapersm`。
 
+注意：`streams` 的自旋用 `clock64()` 计时超时（约 0.1 s），所以「被隐式串行化」的那一路会在超时后**退出**并报告 `flag=0`，进程不会挂住；「真并发」那一路会在若干微秒内看到 `flag=1` 提前退出。
+
 编译：`vcvars64.bat` → `nvcc -O3 -lineinfo -arch=sm_89`（DP 另加 `-rdc=true -lcudadevrt`）。
 
 ## 结果
 
-见 `../../outputs/D10/2026-10-08/`。
+见 `../../tmp/outputs/D10/2026-10-08/`。
 
 - `config`：三种非法配置都**同步**返回错误（9 / 9 / 1）→ launch 配置在提交时校验。
 - `peekget`：peek 连读两次都报同一错误；get 一次后即清空。
@@ -63,4 +65,4 @@ done（2026-10-08 首轮）
 
 | 时间 | 命令 | 产物 |
 |---|---|---|
-| 2026-10-08 | `run.ps1`（build → config/peekget/async/streams/props → memcheck → smem/dp/ptx） | `../../outputs/D10/2026-10-08/` |
+| 2026-10-08 | `run.ps1`（build → config/peekget/async/streams/props → memcheck → smem/dp/ptx） | `../../tmp/outputs/D10/2026-10-08/` |

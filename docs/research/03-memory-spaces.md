@@ -3,7 +3,7 @@ title: 域 03「内存空间」语义
 type: research
 status: draft
 created: 2026-10-08
-updated: 2026-10-08
+updated: 2026-10-11
 tags: [cuda, semantics, memory-spaces, sm_89, local-memory, shared-memory, constant-memory, coalescing, bank-conflict]
 related:
   - INTENT.md
@@ -18,7 +18,7 @@ related:
 
 ## 一句话
 
-CUDA 有六个内存空间（**register / local / shared / global / constant / texture**），每个变量或访存都落在**恰好一个**空间里；这个空间决定了它的**作用域（谁能看见）、生命周期（活多久）、物理落点与访问代价**——而"落进哪个空间"并不完全由源码写法决定，它常常是**编译器根据访问模式选择、必须在 PTX/SASS 层面核对**的结果。
+CUDA 有六个内存空间（**register / local / shared / global / constant / texture**），每个变量或访存都落在**恰好一个**空间里；这个空间决定了它的**作用域（谁能看见）、生命周期（活多久）、物理落点与访问代价**。而"落在哪个空间"并不完全由源码写法决定——它常常是**编译器按访问模式选的**，只能到 PTX/SASS 层面才能确认。
 
 ## 承诺与边界
 
@@ -45,14 +45,14 @@ CUDA 有六个内存空间（**register / local / shared / global / constant / t
 
 ### 反例 1（主）：`float arr[16]` 到底在哪？——源码说了不算
 
-两个 kernel 的源码**完全一样**地声明 `float arr[16]` 并用**运行时**索引访问它，实测却完全不同：
+下面两个 kernel 都用同样写法声明 `float arr[16]`，也都用**运行时**索引去访问，实测结果却完全不同：
 
 | kernel | 索引特点 | regs | stack frame | SASS `LDL`/`STL` | 结论 |
 |---|---|---|---|---|---|
 | `k_local_promoted` | 索引 `& 15`，**可证明在界内** | 25 | 0 B | **0 / 0** | 整个数组被**提升回寄存器** |
 | `k_local_loop` | `volatile` + 长循环动态索引 | 33 | 64 B | 32 / 4 | 真的在 **local memory** |
 
-更深的坑：**在 PTX 里看到 `ld.local`/`st.local`，不等于 SASS 真的走 local memory。** 我们最早的一版内核，PTX 里有 `__local_depot`、`st.local.v4`，但 ptxas 把它提升回寄存器后，SASS 里**一条 `LDL/STL` 都没有**。
+还有个更深的坑：**PTX 里出现 `ld.local`/`st.local`，并不等于 SASS 真的走 local memory。** 我们最早的一版内核，PTX 里有 `__local_depot`、`st.local.v4`，可 ptxas 把它提升回寄存器后，SASS 里**一条 `LDL/STL` 都没有**。
 
 > 所以"数组 = local memory = 慢"这种直觉是错的：
 > 1. 源码写了数组，也可能根本不在 local；
@@ -67,11 +67,11 @@ CUDA 有六个内存空间（**register / local / shared / global / constant / t
 - **uniform 地址**（同 warp 所有 lane 读同一地址）：SASS 用 `ULDC UR5, c[0x3][UR9]`——走 **uniform 数据通路**，广播。
 - **每 lane 分叉地址**：SASS 用 `LDC R8, c[0x3][R13]`——每 lane 一次，**串行化**。
 
-实测（单 warp）：broadcast 35.16 ms vs divergent 91.55 ms ≈ **2.6×**。单 warp 已经能看出差距；warp 越多，串行化的惩罚越被放大。把 constant 当"万能快速只读内存"是错的。
+实测（单 warp；2026-10-08 首测 35.16 vs 91.55 ms，2026-10-11 复测 15.2 vs 39.3 ms——绝对值随 GPU 时钟状态浮动，倍数稳定 ≈ **2.6×**。单 warp 已经能看出差距；warp 越多，串行化的惩罚越被放大）。把 constant 当"万能快速只读内存"是错的。
 
 ### 反例 3（附）：shared 也不是"无条件比 global 快"
 
-32 lanes、地址 `lane*stride + r`：`stride=1`（banks 0..31 各不相同）4.10 ms，`stride=32`（每 lane 都落在 bank 0）20.05 ms，**4.9×** 的 bank conflict。shared 的价值是低延迟 + block 私有 + 片上带宽，而不是"任何访问都快"。
+32 lanes、地址 `lane*stride + r`：`stride=1`（banks 0..31 各不相同）1.95 ms，`stride=32`（每 lane 都落在 bank 0）8.74 ms（2026-10-11 复测；2026-10-08 首测 4.10 / 20.05 ms），**≈4.5–4.9×** 的 bank conflict。shared 的价值是低延迟 + block 私有 + 片上带宽，而不是"任何访问都快"。
 
 ## 本机验证（命令 + 观察）
 
@@ -84,15 +84,22 @@ CUDA 有六个内存空间（**register / local / shared / global / constant / t
 nvcc -O3 -arch=sm_89 -ptx -o mem_spaces.ptx mem_spaces.cu
 ```
 
-观察（`ptx-state-spaces.txt`）：
+观察（`ptx-state-spaces.txt`，节选；本机 2026-10-11 复验逐行核对）：
 
 ```
 DECL  .const .align 4 .b8 cbuf[512];
-DECL  .local .align 16 .b8 __local_depot0[64];
-DECL  .local .align 16 .b8 __local_depot1[64];
+DECL  .local .align 16 .b8 	__local_depot1[64];
+DECL  .local .align 16 .b8 	__local_depot2[64];
+DECL  .local .align 16 .b8 	__local_depot3[64];
+DECL  .shared .align 4 .b8 _ZZ14k_shared_chasePKfPflE1s[64];
 DECL  .shared .align 4 .b8 _ZZ8k_sharedPfilE1s[4096];
-MEM   ld.const.f32      st.local.f32/v4    ld.local.f32
-MEM   ld.shared.f32     ld.global.f32      ld.global.nc.f32   st.global.f32
+DECL  .local .align 16 .b8 	__local_depot10[32];
+MEM   ld.const.f32                 x10
+MEM   ld.global.nc.f32             x1
+MEM   ld.local.f32                 x55
+MEM   ld.shared.f32                x10
+MEM   st.local.v4.f32              x4
+MEM   st.shared.f32                x2
 ```
 
 → 每个空间有独立的**声明**和**指令前缀**；global 空间没有变量声明，只以 `ld.global`/`st.global` 出现。
@@ -117,6 +124,8 @@ cuobjdump -sass mem_spaces.exe > sass.txt
 | `k_const_divergent` | 17 | 0 | 0 | 0 | 0 | 0 | **5** | 1 | 0 |
 | `k_readonly` | 10 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | **1** |
 
+（另注：每个 kernel 还有一条 `ULDC.64` 参数基址加载/若干参数取值指令——它是 uniform 通路的一部分，与「变量落在哪个空间」的判断无关，表中按相关访存指令统计；本机 2026-10-11 复验 LDG/E 内存指令数逐行一致。）
+
 关键指令原文（`cuobjdump -sass`）：
 
 ```
@@ -132,19 +141,21 @@ LDG.E          R7, [R2.64+0x80]
 
 ```powershell
 .\mem_spaces.exe shared
-# shared stride= 1 :    4.102 ms  (300000 iters x 32 lanes)
-# shared stride=32 :   20.049 ms
-# -> 4.9x
+# shared stride= 1 :    1.947 ms  (300000 iters x 32 lanes)
+# shared stride=32 :    8.743 ms
+# -> ~4.5x    （2026-10-08 首测 4.102 / 20.049 ms -> 4.9x；绝对值随时钟状态浮动）
 ```
 
 ### 4) global 合并访问（计时，32MB 工作集、65536 线程）
 
 ```powershell
 .\mem_spaces.exe coalesce
-# global stride= 1 :    0.360 ms
-# global stride=32 :    9.954 ms
-# -> 27.6x
+# global stride= 1 :    0.505 ms
+# global stride=32 :    6.00 ms
+# -> ~12x
 ```
+
+> 计时绝对值随 GPU 时钟/功耗状态浮动：2026-10-08 首测 0.360 / 9.954 ms（27.6×），2026-10-11 复测 0.5 / 6.0 ms（≈12×）；合并与非合并差**一个数量级**这一结论不变。倍数以同一次运行内的两档对比为准。
 
 > 注意：小工作集（≤ L1/L2）会让差距被缓存掩盖，必须把 buffer 放大到远大于 cache 才看得到合并语义的代价。
 
@@ -152,14 +163,16 @@ LDG.E          R7, [R2.64+0x80]
 
 ```powershell
 .\mem_spaces.exe const
-# const broadcast :   35.159 ms
-# const divergent :   91.548 ms
-# -> 2.60x
+# const broadcast :   15.245 ms
+# const divergent :   39.333 ms
+# -> 2.58x    （2026-10-08 首测 35.159 / 91.548 ms -> 2.60x；绝对值随时钟状态浮动）
 ```
 
 ### 6) local vs shared 的 load-to-use 延迟
 
-依赖索引 pointer-chase（2×10⁶ hops）：local(`LDL`) 108.1 ms vs shared(`LDS`) 91.4 ms ≈ **1.18×**。方向符合"local 在 L1/device memory 层、shared 在片上 SRAM"，但循环里 float→int 等开销稀释了两者差距，只作方向性证据。
+依赖索引 pointer-chase（2×10⁶ hops）：local(`LDL`) 65.3 ms vs shared(`LDS`) 55.4 ms ≈ **1.18×**（2026-10-11 复测；2026-10-08 首测 108.1 / 91.4 ms，**倍数不变**，绝对值随时钟状态浮动）。方向符合"local 在 L1/device memory 层、shared 在片上 SRAM"，但循环里 float→int 等开销稀释了两者差距，只作方向性证据。
+
+> 关于这个 chase：索引映射是 `j → (7j mod 16)`，7 与 16 互素，所以它是 0..15 上的一个**置换**（又因 7²≡1，是个对合），链会很快落到不动点 `0`/`8` 或进入 2-循环。这不影响结论：循环次数由 `reps` 写死、**不会提前退出**，每次迭代仍是一次依赖当前 `j` 的 load——正是要测的 load-to-use 依赖链；local 与 shared 用的是同一套映射，两边可比。
 
 ### 7) compute-sanitizer（**本机失败，已记录**）
 
@@ -167,7 +180,7 @@ LDG.E          R7, [R2.64+0x80]
 compute-sanitizer --tool memcheck .\mem_spaces.exe oob   # 越界读 8-float local 数组
 ```
 
-预期：报 `Invalid __local__ read`（证明 local 是有界、每线程的真实内存区域）。
+预期（本机**未观测到**，见下）：报 `Invalid __local__ read`（证明 local 是有界、每线程的真实内存区域）。
 本机实测：`Error: Target application terminated before first instrumented API call`。连 NVIDIA 自带的 `compute-sanitizer\sanitizer_smoke.exe` 都报同样错误 → **本机 sanitizer 无法注入**；`ncu` 也因 `ERR_NVGPUCTRPERM` 取不到计数器。两者在 Windows 上都需管理员权限（`EnableDebuggerInterface.bat` / `RmProfilingAdminOnly=0`），不在本 worker 权限内。本域结论不依赖它即可成立（见「未决」）。
 
 ## 出处

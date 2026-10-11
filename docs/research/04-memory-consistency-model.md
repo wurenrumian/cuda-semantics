@@ -3,18 +3,18 @@ title: 内存一致性模型
 type: research
 status: draft
 created: 2026-10-08
-updated: 2026-10-08
+updated: 2026-10-11
 tags: [cuda, memory-model, consistency, weak-ordering, fence, atomics, scope, volatile, sm_89, cuda-12.8]
 related:
   - docs/plan/cuda-semantics-topic-map.md
   - INTENT.md
-  - ../../outputs/D04/src/memmodel_demo.cu
+  - experiments/EXP-0004-memory-consistency-model/scripts/memmodel_demo.cu
 ---
 
 # 域 04 — 内存一致性模型
 
 > 面向 **sm_89 (Ada, RTX 4060 Laptop) / CUDA 12.8**。所有"本机观察"都在该环境实测，命令与产物见文末。
-> 实验源：`../../outputs/D04/src/memmodel_demo.cu`；产物：`../../outputs/D04/2026-10-08/`。
+> 实验源：`experiments/EXP-0004-memory-consistency-model/scripts/memmodel_demo.cu`；产物：`tmp/outputs/D04/2026-10-08/`。
 
 ## 一句话
 
@@ -45,6 +45,7 @@ CUDA 内存模型是一个**弱序（weakly-ordered）模型**：默认的 `ld`/
 - 不承诺 `volatile` 的原子性或顺序性：它只要求编译器**每次都真访存**（指南 §14.5.3.3），不产生任何 happens-before（见反例 ①）。
 - 不承诺"在某块硬件上没观察出错"：模型给出的是**保证**，不是"本机没复现就安全"（见反例 ④）。
 - 不承诺 `__syncthreads()` 之外的 block 间顺序；block 执行顺序、warp 顺序都不是承诺（见域 2）。
+  更不承诺多个 block（或两个 grid）**同时驻留**——所以跨 block 的无界自旋可能永远等不到（见反例 ④）。
 
 ## 反例
 
@@ -63,9 +64,12 @@ __global__ void k_volatile_inc(volatile int* c, int iters) {
 `64 block × 256 thread × 4000 iter`：
 
 ```
-mode=volatile  expected=65536000 observed=4531 lost=65531469   ← 丢了 99.99%+
-mode=atomic    expected=65536000 observed=65536000 lost=0        ← 对照组
+mode=volatile grid=64 block=256 iters=4000 expected=65536000 observed=4820 lost=65531180   ← 丢了 99.99%+
+mode=atomic   grid=64 block=256 iters=4000 expected=65536000 observed=65536000 lost=0        ← 对照组
 ```
+
+（`observed` 随每次调度浮动：2026-10-08 记录 4820，2026-10-11 复测 4738——量级稳定在千级、
+丢失比例恒定在 99.99%+，但**不是同一数字**；atomic 一侧 65536000/lost=0 每次都复现。）
 
 SASS 直击要害：`volatile` 编译成**系统作用域的强访问**，但每次仍是独立的 `load;add;store`，没有任何原子性：
 
@@ -116,25 +120,33 @@ msg-naive  (仅 volatile)          iters=2000 received_flag=2000 violations=0 ti
 msg-acqrel (release/acquire)      iters=2000 received_flag=2000 violations=0 timeouts=0
 ```
 
-naive 版本 2000 次**一次都没翻车**——因为本机 L2 一致、块同时驻留。但它的 PTX 里 `data` 写和 `flag` 写之间**没有任何 fence**（`st.volatile` / `st.volatile`）：
+naive 版本 2000 次**一次都没翻车**——在本机上 L2 一致，两个 block 又恰好同时驻留。但它的 PTX 里 `data` 写和 `flag` 写之间**没有任何 fence**（`st.volatile` / `st.volatile`）：
 
 ```
 st.volatile.global.u32 [%rd1], %r10   // data = 12345
 st.volatile.global.u32 [%rd2], %r11   // flag = 1      ← 与上一行无顺序承诺
 ```
 
-**"跑十万次都对"不是承诺，只是运气。** 换架构、换块调度、编译器换版本都可能改变观察。要保证，用 acq_rel 版（下一节）。
+**"跑很多次都对"不是承诺，只是运气。** 换架构、换块调度、编译器换版本都可能改变观察。要保证，用 acq_rel 版（下一节）。
+
+**别忘了还有「等不到」这一层。** 这里 `k_msg_*` 用 `<<<2,32>>>`：block0 生产、block1 消费。CUDA
+**不保证**两个 block 同时驻留；本 kernel 只有 2 个小 block，实践中几乎总会同时驻留（所以
+`timeouts=0`），但这**不是承诺**。万一 block1 先被调度、占住 SM 一直自旋，而 block0 排不上，就会
+死锁。代码里给自旋加了上界 `spin_max`，把死锁降级成「报告 timeout」，但那只是让实验**不挂住**，
+不是算法安全——跨 block 自旋要么保证驻留（如 cooperative launch + `grid.sync()`），要么别假设对端
+会并行推进。
 
 ## 本机验证（命令 + 观察）
 
 ### 环境与构建
 
 ```bat
+:: 在 experiments\EXP-0004-memory-consistency-model\scripts\ 下执行
 call E:\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat
 E:\NVIDIA\CUDA\v12.8\bin\nvcc.exe -O3 -lineinfo -arch=sm_89 -o memmodel_demo.exe memmodel_demo.cu
 ```
 
-（`run.ps1` 一次跑完构建 / 运行 / `-ptx` / `-cubin`+`cuobjdump -sass` / `compute-sanitizer`。）
+（`scripts\run.ps1` 一次跑完构建 / 运行 / `-ptx` / `-cubin`+`cuobjdump -sass` / `compute-sanitizer`，产物写入 `tmp/outputs/D04/2026-10-08/`。）
 
 ### 观察 1：运行期数字（上面反例 ①②④）
 
@@ -206,7 +218,7 @@ CUDA C++ Programming Guide（12.8）：
 - **§3.2.7 Memory Synchronization Domains**（含 §3.2.7.1 Memory Fence Interference）— cumulativity、device vs system scope、fence 的保守 flush 与性能。
 - **§9.2.2 Memory Model**（Dynamic Parallelism 章内）— 可作为"内存模型"术语的补充入口。
 
-PTX ISA（v9.x）：
+PTX ISA（v8.7，随 CUDA 12.8）：
 
 - **§8 Memory Consistency Model** — §8.4.2 `volatile` Operation；§8.5 Scope（`.cta/.cluster/.gpu/.sys`）；§8.7 Morally strong operations、§8.7.1 Conflict and Data-races；§8.8 Release and Acquire Patterns；§8.9 Ordering of memory operations（program order / observation order / memory synchronization / causality）。
 - **§9.7.10.8 `ld`**（`.acquire`/`.relaxed`/`.volatile`、`.weak`、cache op）、**§9.7.10.11 `st`**（`.release`/…）。
@@ -232,7 +244,7 @@ CUDA C++ Standard Library（libcu++）：
 
 ## 附：本次运行产物
 
-`../../outputs/D04/2026-10-08/`
+`tmp/outputs/D04/2026-10-08/`
 
 | 文件 | 内容 |
 |---|---|
@@ -244,4 +256,5 @@ CUDA C++ Standard Library（libcu++）：
 | `racecheck-*.txt` | sanitizer 注入失败的证据（环境问题） |
 | `build.log` / `ptx.log` / `cubin.log` | 编译日志 |
 
-源码与 runner：`../../outputs/D04/src/memmodel_demo.cu`、`../../outputs/D04/src/run.ps1`。
+源码与 runner：`experiments/EXP-0004-memory-consistency-model/scripts/memmodel_demo.cu`、
+`experiments/EXP-0004-memory-consistency-model/scripts/run.ps1`。

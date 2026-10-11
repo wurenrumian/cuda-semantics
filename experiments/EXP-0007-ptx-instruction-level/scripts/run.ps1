@@ -1,11 +1,12 @@
 # D07 指令级/PTX — 本机验证脚本 (sm_89 / CUDA 12.8)
-# 用法: powershell -ExecutionPolicy Bypass -File run.ps1
+# 用法: pwsh -File scripts/run.ps1
+# 产物写入仓库根的 tmp/outputs/D07/2026-10-08/（本机，未入库）。
 $ErrorActionPreference = 'Stop'
 $vs    = 'E:\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat'
 $cuda  = 'E:\NVIDIA\CUDA\v12.8\bin'
 $here  = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repo = Split-Path (Split-Path (Split-Path $here -Parent) -Parent) -Parent
-$out  = Join-Path $repo 'tmp\outputs\EXP-0007\2026-10-08'
+$out  = Join-Path $repo 'tmp\outputs\D07\2026-10-08'
 New-Item -ItemType Directory -Force -Path $out | Out-Null
 
 function Dev([string]$cmd) {

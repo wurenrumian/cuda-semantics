@@ -102,24 +102,28 @@ __global__ void k_reduce_shfl(int *out) {
 // (b) shared memory with ONE __syncwarp() before the loop.  A barrier orders
 // the writes before the loop, but each step reads values other lanes are still
 // updating -> the step barrier is missing.  Classic warp-synchronous trap.
+// The guard keeps lanes lane>=off from reading red[lane+off] past red[31].
 __global__ void k_reduce_nosync(int *out) {
   __shared__ int red[32];
   int lane = threadIdx.x & 31;
   red[lane] = threadIdx.x;
   __syncwarp();
   for (int off = 16; off > 0; off >>= 1)
-    red[lane] += red[lane + off];
+    if (lane < off)
+      red[lane] += red[lane + off];
   out[lane] = red[lane];
 }
 
-// (c) same, with a __syncwarp() inside every step.
+// (c) same, with a __syncwarp() inside every step.  Only lane 0 is defined to
+// hold the full sum; lanes >= off do not update in the final step.
 __global__ void k_reduce_sync(int *out) {
   __shared__ int red[32];
   int lane = threadIdx.x & 31;
   red[lane] = threadIdx.x;
   for (int off = 16; off > 0; off >>= 1) {
     __syncwarp();
-    red[lane] += red[lane + off];
+    if (lane < off)
+      red[lane] += red[lane + off];
   }
   __syncwarp();
   out[lane] = red[lane];
@@ -187,10 +191,11 @@ __global__ void k_intrinsics(int *out, int *extra) {
   red[lane] = threadIdx.x;
   for (int off = 16; off > 0; off >>= 1) {
     __syncwarp();
-    red[lane] += red[lane + off];
+    if (lane < off)
+      red[lane] += red[lane + off];
   }
   __syncwarp();
-  out[lane] = red[lane]; // every lane ends with 0+..+31 = 496
+  out[lane] = red[lane]; // only lane 0 ends with 0+..+31 = 496
 
   extra[0] = (int)__ballot_sync(0xffffffffu, lane & 1);   // 0xaaaaaaaa
   extra[1] = __reduce_add_sync(0xffffffffu, threadIdx.x); // 496
@@ -277,7 +282,8 @@ static void runReduce(const char *mode) {
   CK(cudaDeviceSynchronize());
   int h[32];
   CK(cudaMemcpy(h, d, sizeof(h), cudaMemcpyDeviceToHost));
-  printf("%-12s lane0=%d lane31=%d  (want 496)\n", mode, h[0], h[31]);
+  printf("%-12s lane0=%d (want 496)  lane31=%d (not the sum; only lane0 is defined)\n",
+         mode, h[0], h[31]);
   cudaFree(d);
 }
 

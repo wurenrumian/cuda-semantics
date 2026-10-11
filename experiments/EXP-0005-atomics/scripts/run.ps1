@@ -2,7 +2,7 @@
 # Usage: pwsh -File run.ps1
 $script = $PSScriptRoot
 $repo   = Split-Path (Split-Path (Split-Path $script -Parent) -Parent) -Parent
-$out    = Join-Path $repo 'tmp\outputs\EXP-0005\2026-10-08'
+$out    = Join-Path $repo 'tmp\outputs\D05'
 New-Item -ItemType Directory -Force -Path $out | Out-Null
 $nvcc   = 'E:\NVIDIA\CUDA\v12.8\bin\nvcc.exe'
 $cuobj  = 'E:\NVIDIA\CUDA\v12.8\bin\cuobjdump.exe'
@@ -30,8 +30,8 @@ cmd /c "$pre`"$nvcc`" -arch=sm_89 -cubin -o `"$out\atomics_sass.cubin`" `"$sass`
 & $cuobj -sass (Join-Path $out 'atomics_sass.cubin') *> (Join-Path $out 'atomics_sass.sass')
 
 Write-Host "boundary: 128-bit atomic on sm_89 (expected to fail)"
-cmd /c "$pre`"$nvcc`" -arch=sm_89 -cubin -o `"$out\atomics_b128_sm89.cubin`" `"$out\atomics_b128_sm90.cu`"" *> (Join-Path $out 'b128_sm89_build.log')
-cmd /c "$pre`"$nvcc`" -arch=sm_90 -cubin -o `"$out\atomics_b128_sm90.cubin`" `"$out\atomics_b128_sm90.cu`"" *> (Join-Path $out 'b128_sm90_build.log')
+cmd /c "$pre`"$nvcc`" -arch=sm_89 -cubin -o `"$out\atomics_b128_sm89.cubin`" `"$script\atomics_b128_sm90.cu`"" *> (Join-Path $out 'b128_sm89_build.log')
+cmd /c "$pre`"$nvcc`" -arch=sm_90 -cubin -o `"$out\atomics_b128_sm90.cubin`" `"$script\atomics_b128_sm90.cu`"" *> (Join-Path $out 'b128_sm90_build.log')
 
 Write-Host "racecheck: naive"
 & $cs --tool racecheck --error-exitcode 9 $exe race-naive *> (Join-Path $out 'racecheck_naive.txt')

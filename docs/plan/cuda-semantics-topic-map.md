@@ -3,7 +3,7 @@ title: CUDA 语义学习地图
 type: plan
 status: draft
 created: 2026-10-08
-updated: 2026-10-08
+updated: 2026-10-11
 tags: [cuda, semantics, simt, memory-model, atomics, learning]
 related: []
 ---
@@ -29,7 +29,7 @@ related: []
 
 1. **Volta+（本机 sm_89）是独立线程调度（ITS）** → 依赖"warp 隐式锁步"的旧代码在这里是未定义行为。
 2. **sm_89 < sm_90** → **无** TMA、thread block cluster / DSMEM、128-bit 原子、`cp.async.bulk`。这些当概念了解，不在本机跑。
-3. **工具链已就绪** → `compute-sanitizer`（racecheck / synccheck / initcheck）可直接验证内存可见性与竞争假设。
+3. **工具链已安装** → `compute-sanitizer`（racecheck / synccheck / initcheck）本来用于验证内存可见性与竞争假设；但本机**非管理员会话下它无法注入目标进程**，`ncu` 计数器也被拒（`ERR_NVGPUCTRPERM`）。这两项待有权限环境复核，只当基线里的"受限项"。
 
 ---
 
@@ -75,7 +75,7 @@ related: []
 - 与 C++ 内存模型的关系：libcu++ 把 `<atomic>`/`<barrier>` 语义映射到 CUDA。
 - 经典模式：**生产者-消费者**、**标志位 + fence**、**acquire mask 搜索**（CUB 的 decoupled look-back）。
 
-**验证**：`cuda::atomic_ref` 各 order 对比；`compute-sanitizer --tool racecheck`（需先补装）；PTX 里看 `ld.acquire.gpu` / `st.release.gpu` / `fence.sc.gpu`。
+**验证**：`cuda::atomic_ref` 各 order 对比；`compute-sanitizer --tool racecheck`（本机注入受限，待复核）；PTX 里看 `ld.acquire.gpu` / `st.release.gpu` / `fence.sc.gpu`。
 
 ## 5. 原子语义
 
@@ -101,7 +101,7 @@ related: []
 - `cuda::barrier` / `cuda::latch` / `cuda::counting_semaphore`（libcu++）。
 - **cluster / distributed shared memory（sm_90）**：本机不支持，概念了解。
 
-**验证**：手写 `bar.sync` 死锁；`__syncwarp` 与隐式锁步的差异；`compute-sanitizer --tool synccheck`（待补装）。
+**验证**：手写 `bar.sync` 死锁；`__syncwarp` 与隐式锁步的差异；`compute-sanitizer --tool synccheck`（本机注入受限，待复核）。
 
 ## 7. 指令级 / PTX 语义
 
@@ -166,7 +166,7 @@ related: []
 - **内存层级的架构差异**：L1/共享内存统一且可配置划分（carveout）、L2、**32B sector** 决定的合并访问粒度、各代 L1 容量/带宽不同。
 - **原子的落点**：global 原子在 L2 的原子单元解析，shared 原子在共享内存解析 → 吞吐与竞争语义随架构变。
 - **功能单元**：SFU / DP / tensor core 是架构相关的；mma/wmma 的 **fragment 布局**由架构+cuda core 代数决定（sm_89 支持 fp8 tensor core）。
-- **访存路径**：`cp.async` 绕过 L1（sm_80+）；`__ldg` 只读路径依赖 L1/TEX 结构。
+- **访存路径**：`cp.async` 有两个 cache-hint，`cp.async.cg` 绕过 L1、`cp.async.ca` 不绕（SASS 上是 `LDGSTS.E.BYPASS` vs `LDGSTS.E`；sm_80+）；`__ldg` 只读路径依赖 L1/TEX 结构。
 - **目标的代数后缀**：`-arch=sm_89` vs `sm_89a` / `sm_XXf` 族目标 → 决定能否用族特有指令。
 - **不可依赖的"实现细节"**：bank 冲突代价、原子吞吐、发散代价、寄存器→占用率曲线——都是**性能语义**，会随架构变，别写成正确性假设。
 - **可查询的架构事实**：`cudaDeviceProp`（`multiProcessorCount`、`warpSize`、`maxThreadsPerMultiProcessor`、`regsPerMultiprocessor`、`sharedMemPerBlockOptin`、`l2CacheSize`…）、`%smid`。
@@ -192,9 +192,9 @@ related: []
 - 编译观察：`nvcc -ptx`、`nvcc -cubin` + `cuobjdump -sass` / `nvdisasm -c`。
 - 动手最小 repro：每个语义点一个小 kernel，先跑通再对照。
 - profiler：`ncu.exe`（Nsight Compute 2025.1.0）/ `nsys.exe`（Nsight Systems 2024.6.2）。
-- `compute-sanitizer`（`E:\NVIDIA\CUDA\v12.8\compute-sanitizer\compute-sanitizer.exe`）：`racecheck` / `synccheck` / `initcheck` —— 验证本图 4、6、11 域的直接手段。
+- `compute-sanitizer`（`E:\NVIDIA\CUDA\v12.8\compute-sanitizer\compute-sanitizer.exe`）：`racecheck` / `synccheck` / `initcheck` —— 验证本图 4、6、11 域的直接手段（**本机非管理员会话下注入失败，待有权限环境复核**）。
 
 ## 未决
 
-- 学习成果的落地形态：`docs/research/` 笔记？`show/` 可演示的 kernel 集？待定。
+- ~~学习成果的落地形态~~ 已定（2026-10-08）：`docs/research/` 13 篇 + `docs/experiments/` 实验页 + 本机 runner（见 `INTENT.md`）。
 - 是否需要读官方文档并做笔记（CUDA C++ Programming Guide 的 programming model + memory model 章）。

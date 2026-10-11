@@ -3,7 +3,7 @@ title: 域 05 — 原子语义
 type: research
 status: draft
 created: 2026-10-08
-updated: 2026-10-08
+updated: 2026-10-11
 tags: [cuda, semantics, atomics, memory-model, sm_89]
 related: [docs/plan/cuda-semantics-topic-map.md, experiments/EXP-0005-atomics, tmp/outputs/D05]
 ---
@@ -11,7 +11,7 @@ related: [docs/plan/cuda-semantics-topic-map.md, experiments/EXP-0005-atomics, t
 # 域 05 — 原子语义
 
 > 目标机：RTX 4060 Laptop（**sm_89 / Ada**）、CUDA 12.8（nvcc V12.8.61）、driver 596.49。
-> 实验代码与产物：`tmp/outputs/D05/`。出处见文末。
+> 实验代码：`experiments/EXP-0005-atomics/scripts/`；产物：`tmp/outputs/D05/`。出处见文末。
 
 ## 一句话
 
@@ -45,13 +45,16 @@ CUDA 的原子只承诺**「在某个作用域内，一次读-改-写不可分�
 - **不承诺浮点结果可复现**。`atomicAdd(float/double)` 的结果依赖各线程到达顺序；浮点加法不满足结合律，
   同一输入不同调度可得到不同的低位。**别把浮点原子当确定性的累加器。**
 - **不承诺返回值语义之外的任何东西**。返回值是**旧值**（`old`），不是新值、不是总数。
+- **不承诺「另一个 block 现在在跑」**。原子/自旋不会让别的 block 或别的 kernel 变得可调度；
+  跨 block 的生产者-消费者要么有驻留/顺序保证（如 cooperative launch 的 `grid.sync()`），
+  要么必须给自旋设界（见反例 1）。
 - `_system` 原子在 system scope 下的原子性还有**附加条件**（PTX ISA §8.1.1
   *Limitations on atomicity at system scope*）——本机单卡不做实测。
 - **默认 intrinsic 没有 order 参数**；想写「语义正确」的原子要用 libcu++ 的 `cuda::atomic` /
   `cuda::atomic_ref`（可指定 scope + order），它会被编译成 `atom.<order>.<scope>` / `ld.acquire` /
   `st.release` / `fence`。
 
-**两个正交维度**（记住这张表就不会混）：
+**三个正交维度**（记住这张表就不会混）：
 
 | 维度 | 取值 | 默认 | 表达方式 |
 |---|---|---|---|
@@ -63,22 +66,46 @@ CUDA 的原子只承诺**「在某个作用域内，一次读-改-写不可分�
 
 ### 反例 1（核心，语义级）：「用了 atomic 就建立了同步/顺序」
 
-这是最贵的误解。经典 flag+payload 生产者-消费者：
+这是最贵的误解。经典 flag（旗子）+ payload（数据）生产者-消费者：
 
 ```cpp
-// producer: 写 payload（普通 store），再 relaxed 地放旗
-for (int i=0;i<n;i++) data[i] = i+1;
-atomicExch(&ready, 1);          // 默认 = relaxed + device，不排序上面那批 store
+// producer：先写 payload（普通 store），再用 relaxed 原子立旗
+for (int i = 0; i < n; ++i) data[i] = i + 1;
+atomicExch(&ready, 1);          // 默认 = relaxed + device，不给上面那批 store 排序
 
-// consumer: relaxed 地自旋等旗，再读 payload
-while (atomicAdd(&ready,0)==0) {}
-int bad=0; for (int i=0;i<n;i++) if (data[i]!=i+1) ++bad;
+// consumer：relaxed 自旋等旗，看到旗后再读 payload
+int s = 0;
+while (atomicAdd(&ready, 0) == 0) {          // 有界自旋（真实代码见下方）
+  if (++s >= kSpinLimit) break;              // kSpinLimit = 2,000,000
+}
+if (atomicAdd(&ready, 0) == 0) { *bad = -1; return; }   // 超时：报告 -1，不挂住
+int b = 0;
+for (int i = 0; i < n; ++i) if (data[i] != i + 1) ++b;
+*bad = b;
 ```
+
+上面是为了讲清楚而写的精简版；真实代码是 `experiments/EXP-0005-atomics/scripts/atomics_lab.cu` 里的
+`pub_producer` / `pub_consumer`（一个 block、一个线程干活，`kSpinLimit` 同名）。
 
 默认 `atomicExch` 是 relaxed：它**不**保证 producer 的 `data[]` 对 consumer 可见，也**不**保证
 consumer 的 `data[]` 读发生在看到 `ready` 之后。这是一个**数据竞争（UB）**，正确写法要
 producer `__threadfence()`（release）＋ consumer `__threadfence()`（acquire），
 或用 `cuda::atomic_ref` 的 release store / acquire load。
+
+**更要命的坑：跨 block（或跨 grid）自旋等旗，可能永远等不到。**
+CUDA **不保证**不同 block 同时驻留，更不保证两个 grid 同时在跑（见域 2）。设想 consumer 先被
+调度上 SM、一直空转等旗，而 producer 因为没有空位始终启动不了——consumer 等的旗永远不会被立起，
+它就**永不结束**（「不收敛」），而 producer 又在等 consumer 腾出位置，两边都卡住，这就是「死锁」。
+本实验的 producer 与 consumer 恰好是**两个不同的 kernel**、分别提交到两条 stream，正是这种形状。
+所以：
+
+- **别写无界的 `while (atomicAdd(&ready,0)==0) {}`**。要么靠驻留/顺序保证（例如
+  cooperative launch 的 `grid.sync()`，或保证两个 block 一定同时在跑），要么像上面一样
+  给自旋加上界与超时。
+- **有界自旋保证「一定会结束」**：至多自旋 `kSpinLimit` 次（外加上下文里的终检读），到点就放弃并把
+  `bad` 置为 `-1`。这样不会死锁、不会挂住 GPU 和 host 的 `cudaDeviceSynchronize`。
+- **有界超时只是教学保护，不是安全保证**：超时只说明「这次没等到」，它既不证明算法对，
+  也不证明算法错；唯一作用是让程序**不会挂住**，并把「没等到」如实报出来。
 
 **本机证据（同一份二进制，指令级可复现）**：
 
@@ -100,14 +127,27 @@ producer `__threadfence()`（release）＋ consumer `__threadfence()`（acquire�
 atomicMax((int*)out, __float_as_int(v));   // 想当然
 ```
 
-- `-5.0f = 0xC0A00000`，`-3.0f = 0xC0400000`。按**有符号 int** 比较，`0xC0A00000 < 0xC0400000`，
-  于是「较大者」被判成 `-5.0f`。
+- `-5.0f = 0xC0A00000`，`-3.0f = 0xC0400000`。把这两个位模式**当成有符号 int** 来读：
+  `0xC0A00000 = -1063256064`，`0xC0400000 = -1069547520`，所以
+  **`0xC0A00000 > 0xC0400000`**（即 `-1063256064 > -1069547520`）。`atomicMax` 挑的是
+  **位模式最大**的那个，于是选中 `0xC0A00000`，其浮点含义正是较小的 **-5.0f**。
+- 两个负数为什么会反过来：负浮点的位模式最高位（符号位）恒为 1，剩下的位越大代表**绝对值越大、
+  数值越小**。于是「位模式大」在正数区等于「数值大」，在负数区却等于「数值小」——同一个
+  `atomicMax` 在两个区间里挑了相反的方向。（也可直接看成：负浮点的位模式随数值**单调递减**。）
 - 本机实测：`max(-5.0, -3.0)` → naive 给 **-5.0（WRONG）**；正确写法（`atomicCAS` 循环 +
   `fmaxf`）给 **-3.0**。
-- 更阴的是：正数对、混合符号也对，只有「两个负数」错——只测用例很容易漏。
+- 更阴的是：两个都非负时没问题，一正一负也没问题（正浮点的位模式按有符号 int 读 ≥ 0、负浮点
+  都 < 0，所以正的一定赢），**只有「两个负数」错**——只测几个用例很容易漏。
 
-（`atomicMax` 的文档签名只有整型重载，PTX 也没有 `atom.max.f32`；「浮点原子 max」本来就得自己用
-`atomicCAS` 构造。`atomicCAS` 是**通用原子**，可自建任意 RMW，代价是在冲突下自旋重试。）
+（`atomicMax` 的头文件重载只有整型：`int` / `unsigned` / `long long` / `unsigned long long`，
+没有 `float`；PTX 也没有 `atom.max.f32`——本机 `ptxas -arch=sm_89` 对它报错：`Operation .max
+requires .u32 or .s32 or .u64 or .s64 or .f16 or .f16x2 or .bf16 or .bf16x2 type`。所以
+「浮点原子 max」本来就得自己用 `atomicCAS` 构造。`atomicCAS` 是**通用原子**，可自建任意 RMW，代价是在冲突下自旋重试。）
+
+> `proper_fmax` 的循环是 `do { assumed = old; old = atomicCAS(p, assumed, __float_as_int(fmaxf(v, assumed_float))); } while (assumed != old);`：
+> 只有当别的线程在你重算期间又改过 `p`，`atomicCAS` 才会失败、让你重读重算。对这种「只增不减」的
+> `max`，每次成功写回都把值推向新的最大值，而可能取值有限，所以循环会收敛。不过在极端冲突下，
+> 某个线程可能被反复插队而长时间重试——活锁是所有 CAS 循环的通用风险，不是本例特有。
 
 ### 反例 0（底座）：「`x = x + 1` 看起来像一条原子写」
 
@@ -116,8 +156,9 @@ atomicMax((int*)out, __float_as_int(v));   // 想当然
 
 ## 本机验证（命令 + 观察）
 
-所有产物在 `tmp/outputs/D05/`。源码：`atomics_lab.cu`（功能）、`atomics_sass.cu`（指令）、
-`atomics_b128_sm90.cu`（边界）、`sanitizer_smoke.cu`（工具自检）、`run.ps1`（一键跑）。
+所有产物在 `tmp/outputs/D05/`（未入库）。2026-10-11 用本机 scratch 目录（与前述工具链同参数）独立重编复验了一遍，未动 `tmp/`；本节表格与指令级引文均已被那次复验逐行核对。源码在 `experiments/EXP-0005-atomics/scripts/`：
+`atomics_lab.cu`（功能）、`atomics_sass.cu`（指令）、`atomics_b128_sm90.cu`（边界）、
+`sanitizer_smoke.cu`（工具自检）、`run.ps1`（一键跑）。
 
 ### 复现步骤
 
@@ -125,23 +166,24 @@ atomicMax((int*)out, __float_as_int(v));   // 想当然
 $vcvars = 'E:\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat'
 $nvcc   = 'E:\NVIDIA\CUDA\v12.8\bin\nvcc.exe'
 $cuobj  = 'E:\NVIDIA\CUDA\v12.8\bin\cuobjdump.exe'
-$out    = 'E:\Project\cuda-semantics\tmp\outputs\D05'
+$src    = 'E:\Project\cuda-semantics\experiments\EXP-0005-atomics\scripts'   # 源码（入库）
+$out    = 'E:\Project\cuda-semantics\tmp\outputs\D05'                        # 产物（未入库）
 
 # 功能实验
-cmd /c "call `"$vcvars`" && `"$nvcc`" -O3 -lineinfo -arch=sm_89 -o `"$out\atomics_lab.exe`" `"$out\atomics_lab.cu`""
+cmd /c "call `"$vcvars`" && `"$nvcc`" -O3 -lineinfo -arch=sm_89 -o `"$out\atomics_lab.exe`" `"$src\atomics_lab.cu`""
 & "$out\atomics_lab.exe" atomicity
 & "$out\atomics_lab.exe" floatmax
-& "$out\atomics_lab.exe" publish 0 2000     # 无反例：0 bad；加 fence 也是 0
+& "$out\atomics_lab.exe" publish 0 2000     # 无反例：0 bad；加 fence 也是 0；若超时会额外打印 timeouts=…
 
 # 指令级：PTX + SASS
-cmd /c "call `"$vcvars`" && `"$nvcc`" -arch=sm_89 -ptx   -o `"$out\atomics_sass.ptx`"   `"$out\atomics_sass.cu`""
-cmd /c "call `"$vcvars`" && `"$nvcc`" -arch=sm_89 -cubin -o `"$out\atomics_sass.cubin`" `"$out\atomics_sass.cu`""
+cmd /c "call `"$vcvars`" && `"$nvcc`" -arch=sm_89 -ptx   -o `"$out\atomics_sass.ptx`"   `"$src\atomics_sass.cu`""
+cmd /c "call `"$vcvars`" && `"$nvcc`" -arch=sm_89 -cubin -o `"$out\atomics_sass.cubin`" `"$src\atomics_sass.cu`""
 & $cuobj -sass "$out\atomics_sass.cubin" > "$out\atomics_sass.sass"
 & $cuobj -sass "$out\atomics_lab.exe"    > "$out\atomics_lab.sass"   # 真实内核（publish）的 SASS
 
 # 边界：128-bit 原子在 sm_89 应当编译失败，sm_90 通过
-cmd /c "call `"$vcvars`" && `"$nvcc`" -arch=sm_89 -cubin -o `"$out\atomics_b128_sm89.cubin`" `"$out\atomics_b128_sm90.cu`""
-cmd /c "call `"$vcvars`" && `"$nvcc`" -arch=sm_90 -cubin -o `"$out\atomics_b128_sm90.cubin`" `"$out\atomics_b128_sm90.cu`""
+cmd /c "call `"$vcvars`" && `"$nvcc`" -arch=sm_89 -cubin -o `"$out\atomics_b128_sm89.cubin`" `"$src\atomics_b128_sm90.cu`""
+cmd /c "call `"$vcvars`" && `"$nvcc`" -arch=sm_90 -cubin -o `"$out\atomics_b128_sm90.cubin`" `"$src\atomics_b128_sm90.cu`""
 ```
 
 ### 观察 1 — 设备/能力
@@ -198,9 +240,23 @@ SM 数 24，L2 **32 MiB**。
 | 共享竞争 `race-naive` | 8192 | **256** |
 | 共享竞争 `race-atomic` | 8192 | 8192 |
 | 浮点 max `floatmax` | -3.0 | naive **-5.0（WRONG）**；CAS+fmaxf -3.0 |
-| 发布 `publish 0 2000` | 0 | **0**.badRounds（无反例——静默 UB） |
+| 发布 `publish 0 200` / `publish 1 200` / `publish 0 2000` | 0 | **badRounds=0**（三组全部）；无反例——静默 UB；自旋有界，若等不到会额外打印 `timeouts=…` |
 | 边界 `b128_sm89` | 编译失败 | `error: no instance of overloaded function "atomicAdd" matches … (float4 *, float4)` |
 | 边界 `b128_sm90` | 通过 | 生成 `atomics_b128_sm90.cubin` |
+| 超时路径（只跑 consumer，无 producer，有界） | 返回 `bad=-1` | **3/3 轮 `bad=-1`、无错误**，耗时约 **220–280 ms**（见下） |
+
+**超时机制的实测（观察 4b）**：为了亲眼看到「等不到就放弃」确实会返回，用了 **只启动 consumer、
+不启动 producer** 的探针（scratch 文件，不入库；按 `atomics_lab.cu` 里 `pub_consumer` 原样复刻），
+两次独立各跑 3 轮：每轮 `err=no error bad=-1`，耗时 281.3 / 219.8 / 219.8 ms（首次）与
+265.2 / 219.8 / 219.8 ms（2026-10-11 复验）。这说明：有界自旋在 `kSpinLimit = 2,000,000` 次读之后
+确实结束，并把 `-1` 写回，kernel 正常返回，没有挂住。代价是：每次超时要白白烧掉约 0.2–0.3 s 的
+SM 时间。（`atomics_lab.cu` 注释里写的 「~0.1-1 s」 与之相符。）
+
+**与 `publish` 的关系**：正常运行时两个 kernel 都能驻留，producer 很快立旗，`publish` 200/2000 轮
+全程未超时（外层计时的整个进程耗时：2026-10-11 复验 `publish 0 200` 约 1.28 s（含首次 CUDA 初始化）、
+`publish 1 200` 约 0.10–0.13 s、`publish 0 2000` 约 0.21–0.23 s；若某个新进程先付冷初始化，
+`publish 1 200` 也会显示 ~1.2 s。）也就是说，超时分支在本机**只在没有 producer 时**才会走到，
+本实验**从未主动构造**「consumer 占满 SM、producer 启不来」的真死锁场景（那会永远等，故不做）。
 
 ### 观察 5 — compute-sanitizer：本机**不可用**（环境限制）
 
@@ -214,20 +270,23 @@ SM 数 24，L2 **32 MiB**。
 
 **连一个 trivial 的 `cudaMalloc`+kernel 程序（`sanitizer_smoke.cu`）也一样**，`racecheck` /
 `synccheck` / `memcheck` 全部如此。已排除：路径、`--injection-path`、`--target-processes all`、
-`CUDA_INJECTION64_PATH`、复制到 CS 目录、改用 `cmd`/`Start-Process`。判断是**注入失败**：CS 需要
-`HKLM\SOFTWARE\NVIDIA Corporation\GPUDebugger\EnableInterface=1`（`EnableDebuggerInterface.bat`），
-而当前会话**非管理员**，`reg add` 返回 *Access is denied*。
+`CUDA_INJECTION64_PATH`、复制到 CS 目录、改用 `cmd`/`Start-Process`。判断是**注入失败**：目标进程在
+第一个被插桩的 API 调用之前就退出了，插桩库没进去。文档里那条 Windows 前置注册表项
+`HKLM\SOFTWARE\NVIDIA Corporation\GPUDebugger\EnableInterface` **本机已是 `0x1`**（已核对，不是
+原因）；更深一层的排查（例如以管理员跑 `EnableDebuggerInterface.bat`）在**非管理员**会话里做不了
+（`reg add HKLM\...` 返回 *Access is denied*）。
 → 本域**没有**拿到 racecheck 报告；竞争/可见性的证据改用 SASS/PTX（观察 2/3）。
 
-> 顺带纠正记忆：`EXP-0001` 的 README 曾记「racecheck 通过」，但 `tmp/outputs/EXP-0001/` 并不存在，
-> `STATE.md` 也写「未跑出结果」——本机 racecheck 目前跑不起来，那条结论无产物支撑。
+> 顺带核对域 1：`tmp/outputs/EXP-0001/2026-10-08/racecheck-{sync,unsync}.txt` 里同样是上面那条
+> 注入失败信息——域 1 当时也没拿到 racecheck 报告。「本机 racecheck 跑不起来」是本项目的共同阻塞，
+> 任何「racecheck 通过」的说法都应先找到产物再下结论。
 
 ### 产物清单
 
 | 文件 | 内容 |
 |---|---|
-| `run.ps1` | 一键构建 + 全模式 + PTX/SASS + 边界编译 |
-| `atomics_lab.cu` / `atomics_sass.cu` / `atomics_b128_sm90.cu` / `sanitizer_smoke.cu` | 源码 |
+| `run.ps1` | 一键构建 + 全模式 + PTX/SASS + 边界编译（源码在 `experiments/EXP-0005-atomics/scripts/`） |
+| `atomics_lab.cu` / `atomics_sass.cu` / `atomics_b128_sm90.cu` / `sanitizer_smoke.cu` | 源码副本（正本在 `experiments/EXP-0005-atomics/scripts/`） |
 | `run_props.txt` / `run_atomicity.txt` / `run_floatmax.txt` / `run_publish_0_*.txt` / `run_race-*.txt` | 功能输出 |
 | `atomics_sass.ptx` / `atomics_sass.sass` / `atomics_lab.sass` | 指令级证据 |
 | `b128_sm89_build.log` / `b128_sm90_build.log` | 边界编译日志 |
@@ -257,10 +316,15 @@ SM 数 24，L2 **32 MiB**。
 
 ## 未决
 
-- **compute-sanitizer 本机不可用**：需管理员开启 `GPUDebugger\EnableInterface`，或用其它注入前置条件；
+- **compute-sanitizer 本机不可用**：注册表前置项 `GPUDebugger\EnableInterface` 本机已是 `0x1`，
+  但插桩库仍没进目标进程；非管理员会话无法进一步排查（管理员 `EnableDebuggerInterface.bat`）。
   待补 `racecheck` 对本域「可见性/竞争」的独立确认。这是一条**需要复现的环境阻塞**。
 - **反例 1 未在本机复现**（0/2400）。要把它变成「跑得出错」的 litmus，需要跨 SM 的 store-buffer /
   message-passing 变体（域 4 的核心工具），本机尚未搭。当前判定依赖规范 + SASS/PTX。
+- **`publish` 的跨 grid 驻留问题未实测**：消费者已改为**有界自旋 + 超时报告**，本机已验证超时分支
+  会正常返回（观察 4b）；但「consumer 先占住 SM、producer 永远启动不了」这一**真死锁**场景本机尚未构造
+  （历史上 2400 轮全部在超时前收到旗子，本轮 200+200+2000 轮也是）。要复现，需要人为制造驻留压力
+  （占满 SM 后再启动生产者）或换 cooperative launch 对照；这类实验会永远等，必须在外部计时守护下做。
 - **`ATOM…STRONG.GPU` 里 `STRONG` 与 relaxed/acquire 的精确对应**未厘清：本机 relaxed 与 acquire
   的 ATOM 都显示 `.STRONG.GPU`，区别只在 `MEMBAR`/`CCTL.IVALL`。需要对照 `ld.relaxed` vs
   `ld.acquire` 的 SASS 才能定论（可能属域 4/7）。

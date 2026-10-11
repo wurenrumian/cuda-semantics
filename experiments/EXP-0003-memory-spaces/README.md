@@ -37,13 +37,13 @@ done（2026-10-08 首轮）
 
 ## 结果
 
-产物在 `../../outputs/D03/2026-10-08/`（build.log、`mem_spaces.ptx`、`sass.txt`、各模式 txt、`sass-opcode-histogram.txt`、`ptx-state-spaces.txt`、`sanitizer-memcheck-oob.txt`）。
+产物在 `tmp/outputs/D03/2026-10-08/`（build.log、`mem_spaces.ptx`、`sass.txt`、各模式 txt、`sass-opcode-histogram.txt`、`ptx-state-spaces.txt`、`sanitizer-memcheck-oob.txt`）。
 
 - **H1 半否定（关键）**：`float arr[16]` 用**可证明在界内**的运行时索引时，ptxas 把整个数组**提升回寄存器**（0 LDL/STL、0 stack）。只有 `volatile`/长循环索引时才真的进 local（64B stack、32 LDL）。PTX 里甚至出现 `st.local`/`ld.local` 而 SASS 一条 `LDL/STL` 都没有——**空间是编译器决定，必须看 SASS**。
-- **H2 支持**：local 数组的访问是 `LDL/STL`、`localSizeBytes=64`、有 32B 栈帧；依赖链延迟 local(LDL) 108.1ms vs shared(LDS) 91.4ms（1.18x，被循环开销稀释）。
-- **H3 支持**：shared stride=1 4.10ms vs stride=32 20.05ms（4.9x，32 路 bank conflict）。
-- **H4 支持**：constant broadcast 35.16ms vs divergent 91.55ms（2.6x）；SASS broadcast=`ULDC`（uniform 通路），divergent=`LDC`。
-- **H5 支持**：global stride=1 0.36ms vs stride=32 9.95ms（27.6x，32MB 工作集、65536 线程）；小 buffer 时差距被缓存掩盖。
+- **H2 支持**：local 数组的访问是 `LDL/STL`、`localSizeBytes=64`、有 64B 栈帧（32B 栈帧是 `oob` 模式 8-元素数组 `k_local_oob` 的数字，与 `k_local_loop` 的 16-元素数组无关）；依赖链延迟 local(LDL) 65.3ms vs shared(LDS) 55.4ms（1.18x，被循环开销稀释；2026-10-08 首测 108.1/91.4ms，倍数不变）。
+- **H3 支持**：shared stride=1 1.95ms vs stride=32 8.74ms（≈4.5x，32 路 bank conflict；2026-10-08 首测 4.10/20.05ms → 4.9x，绝对值随时钟状态浮动）。
+- **H4 支持**：constant broadcast ≈15.2ms vs divergent ≈39.3ms（≈2.6x；首测 35.16/91.55ms → 2.6x）；SASS broadcast=`ULDC`（uniform 通路），divergent=`LDC`。
+- **H5 支持**：global stride=1 0.5ms vs stride=32 6.0ms（≈12x，32MB 工作集、65536 线程；2026-10-08 首测 0.36/9.95ms → 27.6x，绝对值随时钟状态浮动、量级不变）；小 buffer 时差距被缓存掩盖。
 - **sanitizer 未取到**：本机 `compute-sanitizer` 无法注入（连自带 `sanitizer_smoke.exe` 都报 `Target application terminated before first instrumented API call`）；`ncu` 计数器 `ERR_NVGPUCTRPERM`。两者都需管理员权限。
 
 ## 结论
@@ -63,4 +63,4 @@ done（2026-10-08 首轮）
 
 | 时间 | 命令 | 产物 |
 |---|---|---|
-| 2026-10-08 | `pwsh -File scripts/run.ps1` | `../../outputs/D03/2026-10-08/` |
+| 2026-10-08 | `pwsh -File scripts/run.ps1` | `tmp/outputs/D03/2026-10-08/` |

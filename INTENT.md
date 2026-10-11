@@ -36,7 +36,7 @@
 | 11 | 编译器行为与 UB | 中 |
 | 12 | 架构 / 微架构相关的语义 | 中 |
 
-详见 `tmp/docs/plans/cuda-semantics-topic-map.md`。
+详见 `docs/plan/cuda-semantics-topic-map.md`。
 
 ## 非目标
 
@@ -63,11 +63,14 @@ INTENT.md                       # 北极星（进仓库）
 docs/                           # VitePress 内容源（进仓库）
   .vitepress/config.mts         # 站点配置 + 分域侧边栏
   index.md                      # 首页
-  research/<NN>-<slug>.md       # 12 篇研究稿（毕业产物）
+  plan/cuda-semantics-topic-map.md  # 学习地图（毕业产物）
+  research/<NN>-<slug>.md       # 13 篇研究稿：环境基线 + 12 域（毕业产物）
+  research/index.md             # 域索引
   experiments/EXP-XXXX-*.md     # 实验页：定义 + 一键脚本 + 预期输出
-  evidence/                     # 精选证据（SASS 片段、ncu 摘要、图）
+  experiments/index.md          # 实验索引（读本机 runner 的实验列表）
+  evidence/                     # 精选证据（SASS 片段、ncu 摘要、图；规划）
 experiments/EXP-XXXX-<slug>/    # 实验定义 + 最小脚本（进仓库）
-tmp/                            # 过程记忆（gitignored：journal/STATE/outputs/scratch）
+tmp/                            # 过程记忆（gitignored：journal/STATE/outputs/scratch + 草稿 docs/、experiments/）
 ```
 
 ## 毕业规则（已定）
@@ -112,7 +115,7 @@ tmp/                            # 过程记忆（gitignored：journal/STATE/outp
 
 - GPU **sm_89（Ada, RTX 4060 Laptop）**，CUDA **12.8**。
 - 编译：先 `call E:\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat`，再 `nvcc -arch=sm_89`。
-- `compute-sanitizer` 2025.1.0 可用（racecheck / synccheck / initcheck）；profiler 用 `ncu` / `nsys`。
+- `compute-sanitizer` 2025.1.0 与 `ncu` 均已安装，但**本机非管理员会话下受限**：sanitizer 无法注入目标进程（`terminated before first instrumented API call`），`ncu` 读 GPU 性能计数器报 `ERR_NVGPUCTRPERM`。工具能用的部分先当基线；受限项在各域实验记录里标注「待有权限环境复核」。
 - 每个语义点尽量配一个可跑的验证，产物写 `tmp/outputs/`。
 
 ## 多 agent 分工（Orca 管理）

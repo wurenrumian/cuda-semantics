@@ -3,7 +3,7 @@ title: 域 08 — 浮点与数值语义
 type: research
 status: draft
 created: 2026-10-08
-updated: 2026-10-08
+updated: 2026-10-11
 tags: [cuda, semantics, floating-point, ieee754, fma, ftz, fast-math, denormal, sm_89]
 related:
   - EXP-0008
@@ -27,11 +27,11 @@ CUDA 的浮点**默认**对单精度基本运算保持 IEEE-754 语义（正确�
 ### 边界（不承诺 / 会变）
 
 - **FMA 收缩默认开启**（`--fmad=true` 是 nvcc 默认）。`a*b+c` 这样的表达式"**通常**"被合成一条 `fma.rn.f32`，只舍入一次；它不是 `round(round(a*b)+c)`。PTX ISA 明确允许：`{add,sub,mul}.rnd.f32` "If no rounding modifier is specified, default is `.rn` and instructions **may be folded into a multiply-add**." 想要逐操作 IEEE 语义必须 `-fmad=false` 或写显式 intrinsic。
-- **FTZ 是全局开关**：`--ftz=true`（`-use_fast_math` 会带上）把单精度运算的 **subnormal 输入和结果都冲成符号保留的零**（PTX `.ftz` 修饰符）。它不只影响"极小输入"，而是让**正常输入产生 subnormal 结果**也变 0。
+- **FTZ 是全局开关**：`--ftz=true`（`-use_fast_math` 会带上）把单精度运算的 **subnormal 输入和结果都冲成符号保留的零**（PTX `.ftz` 修饰符）。它不只会冲掉"极小输入"，连**正常输入相乘得到的 subnormal 结果**也会被变成 0。
 - **`-use_fast_math` 是一整套语义让步**，等价于 `--ftz=true --prec-div=false --prec-sqrt=false --fmad=true`，并额外把一批数学库函数替换成 intrinsic：
   - `--prec-div=false`：`x/y` 走近似除法（`div.approx.f32`，几 ULP），`x/y` 也被映射为 `__fdividef`。
   - `--prec-sqrt=false`：`sqrtf(x)` 走 `sqrt.approx.f32`（几 ULP；注意 `sqrtf` **不在** guide 的 `-use_fast_math` 函数替换表里，是这条 flag 在起作用）。
-  - 函数替换（guide Table 18）：`sinf/cosf/tanf/sincosf`、`logf/log2f/log10f`、`expf/exp10f`、`powf`、`tanhf` → 对应 `__*` intrinsic（精度下降 + **特殊值处理不同**）。
+  - 函数替换（guide §13.2 的 *Functions Affected by -use_fast_math* 表）：`sinf/cosf/tanf/sincosf`、`logf/log2f/log10f`、`expf/exp10f`、`powf`、`tanhf` → 对应 `__*` intrinsic（精度下降 + **特殊值处理不同**）。
 - **连显式 intrinsic 也不豁免 FTZ**：`-use_fast_math` 下 `__fdiv_rn(p,q)` 编译成 `div.rn.ftz.f32`（舍入仍是正确舍入，但加了 `.ftz`）。所以 `__f*_rn` 保证的是"**不收缩 + 指定舍入**"，不是"**不受编译选项影响**"。
 - **原子浮点的 denormal 行为由地址空间决定，与 `-ftz` 无关**（文档硬规定）：`atomicAdd(float)` 落在 **global** 时**永远** FTZ（等价 `add.rn.ftz.f32`）；落在 **shared** 时**支持 denormal**（等价 `add.rn.f32`）。同一次 `atomicAdd` 调用，换个地址空间就换语义。
 - **可复现性没有承诺**：`atomicAdd(float)` 的到达顺序由调度决定；不同编译选项、不同 `-arch`、不同求和顺序都可能给出不同 bit。CUDA 只承诺"在某一次具体执行里，每条指令的语义"，不承诺跨运行/跨编译的 bit 一致。
@@ -49,7 +49,7 @@ CUDA 的浮点**默认**对单精度基本运算保持 IEEE-754 语义（正确�
 想当然：IEEE-754 下 `a*b+c` = `round(round(a*b)+c)`，两次正确舍入。
 实测：默认编译下它被收缩成一次舍入的 FMA。
 
-取 `a = b = 1 + 2^-12`（`0x3F801000`），`c = -(1 + 2^-11)`（`0xBF801000`）：
+取 `a = b = 1 + 2^-12`（`0x3F800800`），`c = -(1 + 2^-11)`（`0xBF801000`）：
 
 | 编译 | `a*b+c` 结果 | bit |
 |---|---|---|
@@ -97,7 +97,7 @@ CUDA 的浮点**默认**对单精度基本运算保持 IEEE-754 语义（正确�
 | `sinf(p)` | 一长串内联 `FFMA` 多项式（精确实现） | `sin.approx.ftz.f32`（`MUFU.SIN`） |
 | `__fdiv_rn(p,q)` | `div.rn.f32` | `div.rn.ftz.f32`（注意多了 `.ftz`） |
 
-可观测的 bit 差异：`sinf(1.0f)` 从 `3F576AA5` 变 `3F576AA3`；`sqrtf` 在 `q=11,19,23,37,1.5` 上末位差 1 ULP（见 `probe-*.txt`）。注意 `1/q` 在这批输入上恰好没变——**approx 不等于"总是差"，而是"不再保证"**。
+可观测的 bit 差异：`sinf(1.0f)` 从 `3F576AA5` 变 `3F576AA3`；`sqrtf` 在 `q=11,19,23,37,1.5` 上末位差 1 ULP，`1/q` 在 `q=37` 上也差 1 ULP（见 `probe-*.txt`，其余输入未变）。所以 **approx 不是"总是差"，而是"不再保证正确舍入"**。
 
 ### 反例 5：同一个 kernel，同一份输入，5 次跑出不同 bit
 
@@ -191,7 +191,7 @@ atomicAdd shared 0 + 1e-40f : 000116c2  9.9999461e-41
 - §5.4.1 Arithmetic Instructions — 讨论 `-ftz=true` / `-prec-div=false` / `-prec-sqrt=false` 与性能、精度取舍。
 - §13 Mathematical Functions
   - §13.1 Standard Functions — 各标准数学函数的 ULP 误差上界。
-  - §13.2 Intrinsic Functions — `__fadd_[rn,rz,ru,rd]()` / `__fmul_*` "map to addition and multiplication operations that the compiler **never merges into FMADs**"；"additions and multiplications generated from the `*` and `+` operators **will frequently be combined into FMADs**"；`-use_fast_math` 语义与 **Table 18 "Functions Affected by -use_fast_math"**；原子浮点的 denormal 行为（global 永远 FTZ、shared 支持 denormal）。
+  - §13.2 Intrinsic Functions — `__fadd_[rn,rz,ru,rd]()` / `__fmul_*` "map to addition and multiplication operations that the compiler **never merges into FMADs**"；"additions and multiplications generated from the `*` and `+` operators **will frequently be combined into FMADs**"；`-use_fast_math` 语义与 **"Functions Affected by -use_fast_math" 表**；原子浮点的 denormal 行为（global 永远 FTZ、shared 支持 denormal）。
 
 **CUDA Compiler Driver NVCC（12.8）**
 

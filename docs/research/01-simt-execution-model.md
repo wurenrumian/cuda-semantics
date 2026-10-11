@@ -3,7 +3,7 @@ title: 01 SIMT 执行模型
 type: research
 status: draft
 created: 2026-10-08
-updated: 2026-10-08
+updated: 2026-10-11
 tags: [cuda, semantics, simt, warp, divergence, its, active-mask, sm_89, ada]
 related: ["experiments/EXP-0001-simt-execution-model", "docs/plan/cuda-semantics-topic-map.md"]
 ---
@@ -12,7 +12,7 @@ related: ["experiments/EXP-0001-simt-execution-model", "docs/plan/cuda-semantics
 
 > 目标：讲清 warp（32 线程）这个执行单位**承诺了什么、不承诺什么**。
 > 环境：sm_89（Ada, RTX 4060 Laptop）/ CUDA 12.8 / nvcc V12.8.61。
-> 所有观察来自本机实验，产物在 `tmp/outputs/D01/`，可重跑 `tmp/outputs/D01/run.ps1`。
+> 所有观察来自本机实验：源码在 `experiments/EXP-0001-simt-execution-model/scripts/d01_simt.cu`，一键复现用它旁边的 `run.ps1`，产物写到 `tmp/outputs/EXP-0001/2026-10-08/`（本机，未入库）。
 
 ## 一句话
 
@@ -28,19 +28,19 @@ Volta+/sm_89 的**独立线程调度（ITS）**让 lane 可以各自推进——
 - **warp = 32 线程**，`warpSize == 32`，是 ISA 常量（本机与历代一致）。
 - **一个 warp 一次执行一条公共指令**；不参与该指令的线程被置为 *inactive*（由 active mask 描述）。
   发散的 `if/else` 会**两条路径都执行**（先走一条、再走另一条），不是并行。
-- **warp 级原语（`*_sync`）在给定 `mask` 下是良定义的**：`mask` 里每个自身位置有 bit 的线程，都必须执行**同一条、同一个 mask** 的原语，否则 UB。
-  它们**不隐含内存屏障**，不保证内存序。
+- **warp 级原语（`*_sync`）在给定 `mask` 下是良定义的**：`mask` 的第 N 位对应 lane N；mask 中"自己的位被置上"的线程（已退出的不算），都必须用**同一个 `mask`** 执行**同一条**原语，否则 UB。
+  这些原语**不隐含内存屏障**，不保证内存序。
 - **`__syncwarp(mask)` 保证参与线程之间的内存序**：写共享/全局内存 → `__syncwarp()` → 读其他参与线程写的值，是安全的。
 - **`__activemask()` 返回"调用那一刻"活跃线程的快照**——这是它的全部承诺。
 
 ### 不承诺（想当然就会错的地方）
 
-- 不承诺 warp 锁步：lane 不必在同一指令上。
-- 不承诺发散后的**参与集合**：`__activemask()` 的返回值**不代表**后续指令的收敛集合。
-- 不承诺 warp 级原语带来内存可见性（`__ballot/__shfl/__match/__reduce` 都"do not imply a memory barrier"）。
-- 不承诺 lane 会/不会"跑到前面"：能跑多远由**收敛点（BSSY/BSYNC）**决定，不由语义规定。
+- 不承诺 warp 锁步：lane 不必停在同一指令上。
+- 不承诺发散之后的**参与集合**：`__activemask()` 的返回值**不代表**后续指令的收敛集合。
+- 不承诺 warp 级原语带来内存可见性（`__ballot/__shfl/__match/__reduce` 官方原话都是 "do not imply a memory barrier"）。
+- 不承诺 lane 会/不会"跑到前面"：能跑多远由**收敛点（BSSY/BSYNC）**决定，语义本身不管这件事。
 - 不承诺 warp 内线程的执行顺序、延迟、发射顺序——这些是微架构行为（域 12）。
-- 不能假定 UB 会以某种特定方式表现（比如"读到旧值"）：UB 是"结果无意义"；本机实测里它既可能看起来对（反例 C），也可能稳定错（反例 A）。
+- 不能假定 UB 会以某种特定方式表现（比如"读到旧值"）：UB 的含义是"结果无意义"；本机实测里它既可能看起来对（反例 C），也可能稳定错（反例 A）。
 
 ### 关键机制
 
@@ -51,7 +51,7 @@ Volta+/sm_89 的**独立线程调度（ITS）**让 lane 可以各自推进——
 
 ## 反例
 
-> 每个反例都在本机跑过；命令与原始输出见「本机验证」。全部源码：`tmp/outputs/D01/src/d01_simt.cu`。
+> 每个反例都在本机跑过；命令与原始输出见「本机验证」。全部源码：`experiments/EXP-0001-simt-execution-model/scripts/d01_simt.cu`（产物在 `tmp/outputs/EXP-0001/2026-10-08/`）。
 
 ### 反例 A（核心）：拿 `__activemask()` 当 `__shfl_sync` 的 mask
 
@@ -92,13 +92,25 @@ __shared__ int red[32];
 red[lane] = threadIdx.x;
 __syncwarp();                                   // 只同步一次
 for (int off = 16; off > 0; off >>= 1)
-  red[lane] += red[lane + off];                 // 每一步都读别人正在写的槽
+  if (lane < off)                               // 保护：只让 lane < off 工作，lane+off 不越过 red[31]
+    red[lane] += red[lane + off];               // 每一步都读别人正在写的槽
 ```
 
-**实测**：`reduce-nosync` → `lane0=31`（正确应为 `0+…+31 = 496`），结果错。
-把 `__syncwarp()` 放进循环每一步（`reduce-sync`）→ `lane0=496`，正确。
+**原写法的两个错误**（`k_reduce_nosync` 和 `k_reduce_sync` 最初都没有 `if (lane < off)`）：
 
-**教训**：跨 lane 的读-改-写**每一步**都需要同步，一次屏障不够。
+1. **越界**：`off = 16` 时，lane 16–31 读 `red[32..47]`，超出数组，是 UB。
+2. **同一步内的读写竞争**：lane 16–31 同时改写 `red[16..31]`，而 lane 0–15 正在读这些槽。即使每步都放了 `__syncwarp()`，这一步也不安全。
+
+所以两者都不是"可以收敛到 496 的算法"。加上 guard 后，归约本身是良定义的；`reduce-sync` 的每一步才真正只读写不冲突的槽。
+
+**实测**（加 guard 后，各 5 次，结果一致）：
+
+- `reduce-nosync` → `lane0=164`（正确应为 `0+…+31 = 496`），结果错。旧版（无 guard）测得 `lane0=31`，同样错。
+- `reduce-sync`（每步 `__syncwarp()`，加 guard）→ `lane0=496`，正确。`lane31=31`，不是总和。
+
+**谁拥有结果**：只有 **lane 0** 持有 `0+…+31`。lane 31 在最后一步根本不更新（`lane < off` 对所有 `off ≤ 16` 都为假），所以它的 `red[31]` 保持原值 `31`。非 lane 0 的 `red[]` 只是中间值，不应被当成总和读取。
+
+**教训**：跨 lane 的读-改-写**每一步**都需要同步，一次屏障不够；同时必须保证每个读取的下标都在数组内。
 
 ### 反例 C：相邻 lane"写后读"依赖隐式锁步（UB 可能**看起来是对的**）
 
@@ -148,7 +160,7 @@ E:\NVIDIA\CUDA\v12.8\bin\nvcc.exe -O3 -arch=sm_89 -cubin -o bin\d01_simt.cubin s
 # 4) SASS
 E:\NVIDIA\CUDA\v12.8\bin\cuobjdump.exe -sass -fun _Z6k_sassPii bin\d01_simt.cubin
 # 5) 一键（含全部日志与 SASS 落盘）
-pwsh -File tmp\outputs\D01\run.ps1
+pwsh -File experiments\EXP-0001-simt-execution-model\scripts\run.ps1
 ```
 
 ### 观察 1：`__activemask()` 随程序点变化（`logs/mask.txt`）
@@ -171,7 +183,7 @@ pwsh -File tmp\outputs\D01\run.ps1
 - `__ballot_sync(0xffffffff, lane&1)` = `0xaaaaaaaa`（奇数位）。
 - `__reduce_add_sync(0xffffffff, tid)` = `496`。
 - `__match_any_sync(0xffffffff, lane>>4)`：lane 0–15 → `0x0000ffff`，lane 16–31 → `0xffff0000`。
-- 共享内存归约（每步 `__syncwarp()`）lane0 = `496`。
+- 共享内存归约（每步 `__syncwarp()`，加 `if (lane < off)` 保护）lane0 = `496`；只有 lane0 持有总和。
 
 ### 观察 3：SASS（`logs/sass-*.txt`）
 
@@ -193,10 +205,10 @@ pwsh -File tmp\outputs\D01\run.ps1
 
 ### 产物
 
-- 源码：`tmp/outputs/D01/src/d01_simt.cu`
-- 脚本：`tmp/outputs/D01/run.ps1`
-- 日志（行为 + SASS + sanitizer 尝试）：`tmp/outputs/D01/logs/`
-- 二进制/cubin/PTX：`tmp/outputs/D01/bin/`
+- 源码：`experiments/EXP-0001-simt-execution-model/scripts/d01_simt.cu`
+- 脚本：`experiments/EXP-0001-simt-execution-model/scripts/run.ps1`
+- 日志（行为 + SASS + sanitizer 尝试）：`tmp/outputs/EXP-0001/2026-10-08/logs/`（2026-10-08 的旧版日志另存于 `tmp/outputs/D01/logs/`）
+- 二进制/cubin/PTX：`tmp/outputs/EXP-0001/2026-10-08/bin/`
 
 ## 出处
 
@@ -227,8 +239,9 @@ pwsh -File tmp\outputs\D01\run.ps1
    待查：是否需管理员 / `EnableDebuggerInterface` 已为 1 / 是否是 driver 596.49 与 sanitizer 2025.1.0 不兼容 / 安全软件拦截注入。
    逐条证据：`tmp/outputs/D01/logs/racecheck-*.txt`、`synccheck-*.txt`、`memcheck-*.txt`。
 2. **`ncu` 指标权限**：`ERR_NVGPUCTRPERM`。若拿到管理员，可采 branch-efficiency / divergence 指标作为域 1/12 的量化旁证。
-3. **`reduce-sync` 的 SASS 里没有逐迭代 `WARPSYNC`，但结果正确**（`sass-k_reduce_sync.txt`）。
-   需要弄清：nvcc 是否因"完全收敛"把 `__syncwarp()` 优化掉、改由别的手段（执行序？）保证，这是否**可靠**（还是本例的巧合）。
+3. **`reduce-sync` 的 SASS 里没有逐迭代 `WARPSYNC`，但结果正确**。加 guard 后重新核对（`cuobjdump -sass -fun _Z13k_reduce_syncPi`）：SASS 中没有 `WARPSYNC`、`BSSY`、`BSYNC`，5 步被展开成带谓词的直线代码（`@!P0 LDS/STS`）。
+   也就是说，nvcc 因为控制流完全收敛，把 `__syncwarp()` 消去了；步间顺序靠的是生成的代码，而不是编程模型的保证。
+   待查：这种情况是否可靠（还是本例的巧合）。旧的 `tmp/outputs/D01/logs/sass-k_reduce_sync.txt` 是加 guard 之前的，尚未按新源重新生成。
    对照：`k_sass` 里同一写法确实生成了显式 `WARPSYNC`。
 4. **可否构造一个非计时的 ITS 可观测演示**：例如早完成的 lane 在 `BSYNC` 之前先写一个标志，让别的 lane 读到——用来把"独立推进只到收敛点"变成可打印的证据。
 5. **反例 A 修正**：`__activemask()` 的一个**正当**用途（cooperative groups "Discovery Pattern"）与本文陷阱的边界，留待域 6（同步原语）交叉。

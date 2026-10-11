@@ -16,7 +16,7 @@ export default defineConfig({
     sidebar: {
       '/research/': [
         {
-          text: 'CUDA 语义（12 域）',
+          text: 'CUDA 语义（环境基线 + 12 域）',
           items: [
             { text: '00 · 环境基线', link: '/research/00-baseline' },
             { text: '01 · SIMT 执行模型', link: '/research/01-simt-execution-model' },

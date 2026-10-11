@@ -54,6 +54,19 @@ __global__ void shared_counter_atomic(int *out, int iters) {
 }
 
 // -------------------- publish (flag + payload) ----------------------------
+// pub_producer and pub_consumer are launched as *separate kernels on separate
+// streams* (see mode_publish), and CUDA does NOT promise that two grids are
+// ever co-resident. So the consumer must not spin forever: if the producer
+// grid is not scheduled while the consumer sits resident, an unbounded spin
+// would hang the GPU (and the host's cudaDeviceSynchronize with it).
+//
+// The consumer below uses a *bounded* spin as a teaching guard and reports a
+// timeout instead of hanging. That guard does NOT make the pattern correct:
+// cross-block / cross-grid producer-consumer still needs a real residency or
+// ordering guarantee (e.g. cooperative launch + grid.sync, or a single-kernel
+// protocol). See docs/research/05-atomics.md.
+constexpr int kSpinLimit = 2000000;  // relaxed re-reads before giving up (~0.1-1 s)
+
 __global__ void pub_producer(int useFence, int n, int *data, int *ready) {
   if (threadIdx.x == 0) {
     for (int i = 0; i < n; ++i) data[i] = i + 1;     // payload (plain stores)
@@ -63,7 +76,11 @@ __global__ void pub_producer(int useFence, int n, int *data, int *ready) {
 }
 __global__ void pub_consumer(int useFence, int n, int *data, int *ready, int *bad) {
   if (threadIdx.x == 0) {
-    while (atomicAdd(ready, 0) == 0) { }             // relaxed spin
+    int s = 0;
+    while (atomicAdd(ready, 0) == 0) {               // relaxed spin (bounded)
+      if (++s >= kSpinLimit) break;                  // do not hang
+    }
+    if (atomicAdd(ready, 0) == 0) { *bad = -1; return; }  // -1 = timeout
     if (useFence) __threadfence();                   // acquire
     int b = 0;
     for (int i = 0; i < n; ++i)
@@ -137,7 +154,7 @@ static void mode_publish(int useFence, int rounds) {
   CK(cudaMalloc(&data, sizeof(int) * n));
   CK(cudaMalloc(&ready, sizeof(int)));
   cudaStream_t s1, s2; CK(cudaStreamCreate(&s1)); CK(cudaStreamCreate(&s2));
-  long badRounds = 0, maxBad = 0;
+  long badRounds = 0, maxBad = 0, timeouts = 0;
   for (int r = 0; r < rounds; ++r) {
     CK(cudaMemset(data, 0, sizeof(int) * n));
     CK(cudaMemset(ready, 0, sizeof(int)));
@@ -146,10 +163,15 @@ static void mode_publish(int useFence, int rounds) {
     pub_consumer<<<1, 32, 0, s2>>>(useFence, n, data, ready, d);
     CK(cudaGetLastError()); CK(cudaDeviceSynchronize());
     int bad; CK(cudaMemcpy(&bad, d, sizeof(int), cudaMemcpyDeviceToHost));
-    if (bad > 0) { ++badRounds; if (bad > maxBad) maxBad = bad; }
+    if (bad < 0) ++timeouts;                 // consumer hit the bounded spin limit
+    else if (bad > 0) { ++badRounds; if (bad > maxBad) maxBad = bad; }
   }
   printf("publish fence=%d rounds=%d : badRounds=%ld maxBadInts=%ld\n",
          useFence, rounds, badRounds, maxBad);
+  if (timeouts)
+    printf("publish fence=%d : timeouts=%ld  -> consumer hit the bounded spin limit\n"
+           "  (cross-grid spin needs guaranteed co-residency; see docs/research/05-atomics.md)\n",
+           useFence, timeouts);
   cudaStreamDestroy(s1); cudaStreamDestroy(s2);
   cudaFree(d); cudaFree(data); cudaFree(ready);
 }

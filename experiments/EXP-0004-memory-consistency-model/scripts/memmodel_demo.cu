@@ -60,6 +60,12 @@ __global__ void k_prod_release(int* data, int* flag) {        // release store�
 // 3. 跨 block 消息传递：block0 生产，block1 消费
 //    flag 两个版本都用 volatile 自旋，避免自旋被编译器提升；
 //    差别只在「data 写与 flag 写之间有没有 release 语义」。
+//
+//    注意：本 kernel 用 <<<2,32>>>，block0 生产、block1 消费。CUDA 不保证
+//    两个 block 同时驻留，所以这里的自旋依赖「另一个 block 恰好在跑」。消费者
+//    的自旋有上界 spin_max（教学保护，超时会计入 timeouts 而不是挂住）——但这
+//    只是不让实验挂死，不等于算法安全：跨 block 自旋要么保证驻留（如
+//    cooperative launch + grid.sync），要么就别假设另一端会并行推进。
 // ------------------------------------------------------------------
 __global__ void k_msg_naive(volatile int* data, volatile int* flag, int* out, int spin_max) {
     if (blockIdx.x == 0) {

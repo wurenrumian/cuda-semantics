@@ -1,4 +1,4 @@
-// EXP-0002 / domain 06 — synchronization primitives.
+// EXP-0006 / domain 06 — synchronization primitives.
 // Target: sm_89 (Ada, RTX 4060 Laptop), CUDA 12.8.  Build & run: scripts/run.ps1
 //
 // Modes (argv[1]):
@@ -11,13 +11,18 @@
 //   syncwarp-partial-alive     — half-warp __syncwarp(), other half SPINS -> wedges
 //   named-barrier              — two independent named barriers partition the block
 //
-// The "*alive" modes wedge; a host-side watchdog polls cudaStreamQuery for ~5 s
-// and reports the wedge, then _exit(0) so a deadlocked barrier is observable
-// without hanging the shell.
+// The "*alive" modes wedge ON PURPOSE: a sibling thread spins on a flag that is
+// never set, so the barrier it never reaches can never be satisfied. This is a
+// deliberate non-terminating demo of a divergent barrier deadlock, not a bug.
+// A host-side watchdog polls cudaStreamQuery (hard deadline ~0.5 s; measured
+// wall time is printed) and reports the wedge, then _exit(0) so a deadlocked
+// barrier is observable without hanging the shell.
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <chrono>
 #include <string>
+#include <thread>
 #include <cuda_runtime.h>
 
 #define CUDA_CHECK(x)                                                        \
@@ -118,7 +123,10 @@ __global__ void k_named_barrier(int *out) {
 }
 
 // ---------------------------------------------------------------------------
-// Host-side watchdog: launch, poll cudaStreamQuery for ~5 s, report outcome.
+// Host-side watchdog: launch, poll cudaStreamQuery with a hard ~0.5 s deadline
+// (50 polls x 10 ms; the old 20M-iteration busy loop measured ~0.25 s for all
+// 50 polls, far below the "~5 s" it assumed), report outcome with the measured
+// elapsed time.
 // ---------------------------------------------------------------------------
 static void run_with_watchdog(void (*k)(int *, volatile int *), int n,
                               const char *label) {
@@ -130,18 +138,21 @@ static void run_with_watchdog(void (*k)(int *, volatile int *), int n,
   k<<<1, n>>>(d, spin);
   CUDA_CHECK(cudaGetLastError());
   cudaError_t e = cudaErrorNotReady;
-  for (int i = 0; i < 50; ++i) {                 // 50 * ~100 ms = ~5 s
+  auto t0 = std::chrono::steady_clock::now();
+  for (int i = 0; i < 50; ++i) {                 // 50 polls x 10 ms ~= 0.5 s deadline
     e = cudaStreamQuery(0);
     if (e != cudaErrorNotReady) break;
-    for (volatile int j = 0; j < 20000000; ++j) {}
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
   }
+  double held =
+      std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
   if (e == cudaSuccess) {
     int h0 = -1;
     cudaMemcpy(&h0, d, sizeof(int), cudaMemcpyDeviceToHost);
     printf("%s: FINISHED (block completed; out[0]=%d)\n", label, h0);
   } else if (e == cudaErrorNotReady) {
-    printf("%s: WEDGED — still running after ~5 s (barrier never satisfied)\n",
-           label);
+    printf("%s: WEDGED — kernel still unfinished after %.2f s (barrier never satisfied)\n",
+           label, held);
     fflush(stdout);
     _exit(0);                                    // abandon the stuck context
   } else {

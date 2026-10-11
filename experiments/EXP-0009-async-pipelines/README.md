@@ -1,6 +1,6 @@
 # EXP-0009 — 异步与流水语义
 
-对应域 09（`tmp/docs/research/09-async-pipelines.md`）。
+对应域 09（`docs/research/09-async-pipelines.md`）。
 
 ## 状态
 
@@ -40,7 +40,7 @@ compute-sanitizer。
 
 ## 结果
 
-见 `../../outputs/D09/2026-10-08/`。
+见 `../../tmp/outputs/D09/2026-10-08/`。
 
 - `memcpy`：pageable **33.19 ms** vs pinned **0.013 ms** → 支持 H1。
 - `ds`：legacy 比值 **1.99**、per-thread **1.04** → 支持 H2。
@@ -69,4 +69,4 @@ compute-sanitizer。
 
 | 时间 | 命令 | 产物 |
 |---|---|---|
-| 2026-10-08 | `scripts/run.ps1`（build → 各模式 → SASS → TMA 探针 → sanitizer） | `../../outputs/D09/2026-10-08/` |
+| 2026-10-08 | `scripts/run.ps1`（build → 各模式 → SASS → TMA 探针 → sanitizer） | `../../tmp/outputs/D09/2026-10-08/` |

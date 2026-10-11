@@ -8,7 +8,11 @@
 //   occupancy  occupancy is limited by threads AND registers AND shared memory;
 //              `__launch_bounds__(maxTPB, minBlocksPerSM)` trades registers for
 //              residency (and can spill to local memory).
-//   barrier    divergent __syncthreads() for `compute-sanitizer --tool synccheck`.
+//   barrier    bounded block-synchronization demos: (a) __syncthreads() waits
+//              for every thread, then releases the whole block together;
+//              (b) a named barrier (bar.sync id,count) that only a subset
+//              joins. The old unbounded divergent-__syncthreads() demo was
+//              removed -- it never returns (see README.md).
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -236,23 +240,90 @@ static int run_occupancy() {
 }
 
 // ---------------------------------------------------------------------------
-// barrier: a divergent __syncthreads() (only half the block ever arrives).
+// barrier: block synchronization, demonstrated with bounded work only.
+//
+//   __syncthreads()      == bar.sync 0 over the WHOLE block. It takes no
+//                           thread count, so every non-exited thread of the
+//                           block must reach it. Reaching it from only part of
+//                           the block is undefined behaviour: in practice the
+//                           block waits for threads that will never arrive,
+//                           i.e. it hangs. That known-bad shape is documented
+//                           in README.md but deliberately NOT runnable here.
+//
+//   bar.sync id, count    == a NAMED barrier with an explicit participant
+//                           count. PTX requires that count to be a multiple of
+//                           the warp size, so "16 of 32" cannot be expressed --
+//                           whole warps only. Used below with count = 32.
+//
+// Both kernels use fixed iteration counts and a fixed thread count, so
+// `thread_hierarchy.exe barrier` always returns.
 // ---------------------------------------------------------------------------
-__global__ void barrier_deadlock(int *out) {
-  if (threadIdx.x < 16) {
-    while (true) __nanosleep(1000); // never reach the barrier
+#define BARRIER_SPIN 100000 // bounded "late arrival" work
+
+// All 32 threads reach __syncthreads(); lanes 0..15 first do bounded work, so
+// lanes 16..31 sit at the barrier until the late half arrives and every lane
+// then reports the same elapsed time (the barrier releases the block at once).
+__global__ void barrier_wait(int *out) {
+  int tid = threadIdx.x;
+  long long t0 = clock64();
+  if (tid < 16) { // the "late" half
+    volatile unsigned s = (unsigned)(tid + 1);
+    for (int i = 0; i < BARRIER_SPIN; ++i)
+      s = s * 1103515245u + 12345u;
+    if (s == 0xdeadbeefu) out[0] = -1; // keep the loop live
   }
-  __syncthreads();
-  out[threadIdx.x] = 1;
+  __syncthreads(); // ALL 32 threads arrive -> completes
+  out[tid] = (int)(clock64() - t0);
+}
+
+// Named barrier with an explicit count. The block has 64 threads, but only
+// warp 0 joins barrier #1 (count = 32 = one warp, the granularity PTX allows);
+// warp 1 just walks past. Well defined, and bounded.
+__global__ void barrier_named(int *out) {
+  int tid = threadIdx.x;
+  out[tid] = 0; // 0 = did not take part; set to 1 by the warp that joins
+  long long t0 = clock64();
+  if (tid < 32) { // only warp 0 participates
+    asm volatile("bar.sync 1, 32;" ::: "memory");
+    out[tid] = 1;
+  }
+  out[64 + tid] = (int)(clock64() - t0);
 }
 
 static int run_barrier() {
   int *dout;
-  CUDA_CHECK(cudaMalloc(&dout, 32 * sizeof(int)));
-  barrier_deadlock<<<1, 32>>>(dout);
+  CUDA_CHECK(cudaMalloc(&dout, 128 * sizeof(int)));
+  CUDA_CHECK(cudaMemset(dout, 0, 128 * sizeof(int)));
+  int h[128];
+
+  // (1) __syncthreads(): the early half waits for the late half, then all leave together.
+  barrier_wait<<<1, 32>>>(dout);
   CUDA_CHECK(cudaGetLastError());
-  CUDA_CHECK(cudaDeviceSynchronize()); // hangs if not aborted by the tool
-  printf("barrier kernel completed (no error surfaced)\n");
+  CUDA_CHECK(cudaDeviceSynchronize());
+  CUDA_CHECK(cudaMemcpy(h, dout, 32 * sizeof(int), cudaMemcpyDeviceToHost));
+  int mn = h[0], mx = h[0];
+  for (int i = 1; i < 32; ++i) {
+    if (h[i] < mn) mn = h[i];
+    if (h[i] > mx) mx = h[i];
+  }
+  printf("__syncthreads(), 32 threads, lanes 0..15 arrive late:\n");
+  printf("  lane  0 (late)  elapsed %d cycles\n", h[0]);
+  printf("  lane 16 (early) elapsed %d cycles   <- waited at the barrier\n", h[16]);
+  printf("  all 32 lanes released within %d cycles of each other\n", mx - mn);
+
+  // (2) named barrier: warp 0 joins barrier #1, warp 1 is never blocked.
+  CUDA_CHECK(cudaMemset(dout, 0, 128 * sizeof(int)));
+  barrier_named<<<1, 64>>>(dout);
+  CUDA_CHECK(cudaGetLastError());
+  CUDA_CHECK(cudaDeviceSynchronize());
+  CUDA_CHECK(cudaMemcpy(h, dout, 128 * sizeof(int), cudaMemcpyDeviceToHost));
+  printf("bar.sync 1, 32 (named barrier, count = one warp):\n");
+  printf("  warp 0 / lane  0: participated=%d elapsed %d cycles\n", h[0], h[64]);
+  printf("  warp 1 / lane 32: participated=%d elapsed %d cycles   <- never blocked\n",
+         h[32], h[96]);
+  printf("note: the count must be a multiple of the warp size, so \"16 of 32\" is\n");
+  printf("      not expressible; a plain __syncthreads() reached by only part of\n");
+  printf("      the block is undefined behaviour and can hang forever.\n");
   cudaFree(dout);
   return 0;
 }

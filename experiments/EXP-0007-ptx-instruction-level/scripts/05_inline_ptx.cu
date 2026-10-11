@@ -19,10 +19,14 @@ __global__ void addone(float* x) {
     x[0] = v;
 }
 
-// 故意不带 "memory" clobber 的"自造屏障"（反面示范，见正文）
+// 反面示范：自造"屏障"，却漏了 "memory" clobber。
+// bar.sync 在硬件上确实是 CTA 屏障，但没有 "memory" 时编译器不知道这条内联汇编会碰内存，
+// 于是可以把它周围的访存重排、合并甚至删除——屏障语义被编译器整个绕过。
+// 正确写法：asm volatile("bar.sync 0;" ::: "memory")，或干脆用 __syncthreads()。
+// 详见 docs/research/07-ptx-instruction-level.md。
 __global__ void fake_fence(int* flag, int* data, int* out) {
     *data = 7;
-    asm volatile("bar.sync 0;" ::: );   // 缺 memory clobber
+    asm volatile("bar.sync 0;" ::: );   // 缺 "memory" clobber
     *out = *flag;
 }
 

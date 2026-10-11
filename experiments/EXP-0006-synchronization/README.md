@@ -1,8 +1,8 @@
-# EXP-0002 — 同步原语（域 06）
+# EXP-0006 — 同步原语（域 06）
 
 ## 状态
 
-done（2026-10-08）· 见 `tmp/docs/research/06-synchronization.md`
+done（2026-10-08）· 见 `docs/research/06-synchronization.md`
 
 ## 问题
 
@@ -20,7 +20,8 @@ done（2026-10-08）· 见 `tmp/docs/research/06-synchronization.md`
 
 `scripts/sync_demo.cu` 若干模式 + `scripts/run.ps1`（build → cubin → `cuobjdump -sass` → 各模式 → sanitizer 模板命令）。
 一种"退出 vs 存活"的对照：让没到屏障的一半线程要么 `EXIT`，要么自旋（读一个永不变化的 global flag）。
-自旋模式由 host 看门狗轮询 `cudaStreamQuery` ~5s 判定是否 wedge。
+
+> 那两个带 `-alive` 的模式是**故意构造的不终止演示**：自旋线程永远等不到那个永远不变的 flag，目的是把"发散屏障会卡死"演出来，不是代码 bug。为免把 shell 挂住，宿主看门狗轮询 `cudaStreamQuery`（约 0.5 s 截止，实测 ~0.76–0.78 s 触发，打印的是**实测秒数**）后判定 wedge 并 `_exit(0)`；`run.ps1` 再给每次运行套一层硬超时兜底。
 
 ## 结果
 
@@ -29,9 +30,9 @@ done（2026-10-08）· 见 `tmp/docs/research/06-synchronization.md`
 | 观察 | 结果 |
 |---|---|
 | `divergent-syncthreads`（另一半 EXIT） | **FINISHED**（没挂） |
-| `divergent-syncthreads-alive`（另一半自旋） | **WEDGED**（~5s 未完成） |
+| `divergent-syncthreads-alive`（另一半自旋） | **WEDGED**（看门狗 ~0.76 s 判定，未挂住） |
 | `divergent-syncwarp`（另一半 EXIT） | **FINISHED** |
-| `syncwarp-partial-alive`（另一半自旋） | **WEDGED** |
+| `syncwarp-partial-alive`（另一半自旋） | **WEDGED**（看门狗 ~0.78 s 判定，未挂住） |
 | `named-barrier`（`bar.sync 1/2,128` 分半） | 正确 128/128 |
 | `bar.sync 1,16` 编译 | ptxas **报错**：count 必须是 warp 的倍数 |
 | SASS | `BAR.SYNC 0x0`；命名屏障 `BAR.SYNC 0x2,0x80`；warp 屏障 `WARPSYNC 0xffffffff` |

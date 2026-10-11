@@ -1,5 +1,5 @@
 # EXP-0001 runner — SIMT 执行模型（mask / shuffle / reduce / ITS timing / sanitizer）
-# 源: tmp/outputs/D01/src/d01_simt.cu（域 01 研究稿实际使用的 demo）。
+# 源: experiments/EXP-0001-simt-execution-model/scripts/d01_simt.cu（域 01 研究稿实际使用的 demo）。
 # 产物统一写入 <repo>/tmp/outputs/EXP-0001/（本机，未入库）。
 # Usage: pwsh -File scripts/run.ps1
 $ErrorActionPreference = 'Continue'

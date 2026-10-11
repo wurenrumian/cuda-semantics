@@ -55,6 +55,10 @@ __global__ void k_local_loop(const float *in, float *out, int sel, long reps) {
 
 // B) load-to-use latency through a dependent index (pointer chasing):
 //    local memory (device memory, L1-cached) vs shared memory (on-chip SRAM).
+//    The index map is j -> (7*j) mod 16. gcd(7,16)=1 and 7^2==1 (mod 16), so the
+//    map is a permutation / involution: the chase settles into a fixed point (0 or 8)
+//    or a 2-cycle. It never diverges, and the loop is bounded by `reps`, so the chain
+//    always runs exactly `reps` dependent loads and then exits.
 __global__ void k_local_chase(const float *in, float *out, long reps) {
   volatile float arr[16];
 #pragma unroll
@@ -65,7 +69,7 @@ __global__ void k_local_chase(const float *in, float *out, long reps) {
 }
 
 __global__ void k_shared_chase(const float *in, float *out, long reps) {
-  __shared__ float s[16];
+  __shared__ float s[16];              // same index map as k_local_chase: j -> 7j mod 16
   if (threadIdx.x < 16) s[threadIdx.x] = (float)((threadIdx.x * 7) & 15);
   __syncthreads();
   int j = (int)in[15] & 15;
@@ -111,6 +115,12 @@ __global__ void k_shared(float *out, int stride, long reps) {
 // ===========================================================================
 // E) global coalescing: contiguous (stride 1) vs strided (stride 32 floats).
 //    Many warps so the measurement is bandwidth-bound, not latency-bound.
+//    `r*97` decorrelates successive iterations; `tid*stride` fixes the warp access
+//    pattern: stride 1 -> consecutive floats (one 128B line per warp), stride 32 ->
+//    128B apart per lane (32 distinct sectors per warp). `& mask` keeps every read
+//    address in bounds; the loop count is bounded by `reps`. The write
+//    `out[tid] = acc` needs one slot per thread -- the host sizes `out` for the
+//    full 65536-thread grid (see main).
 // ===========================================================================
 __global__ void k_coal(const float *in, float *out, int stride, long reps,
                        int mask) {
@@ -166,9 +176,14 @@ int main(int argc, char **argv) {
 
   std::vector<float> h(4096);
   for (size_t i = 0; i < h.size(); ++i) h[i] = (float)(i % 97) * 0.5f;
+  // dout must hold one element per active thread of the LARGEST launch:
+  // k_coal runs 256x256 = 65536 threads and every thread stores out[tid]; the
+  // other kernels use <= 64 threads. (Previously dout was sized to h only,
+  // which sent k_coal's writes ~236 KB past the end of the allocation.)
+  const size_t outElems = std::max(h.size(), (size_t)65536);
   float *din = nullptr, *dout = nullptr;
   CUDA_CHECK(cudaMalloc(&din, h.size() * sizeof(float)));
-  CUDA_CHECK(cudaMalloc(&dout, h.size() * sizeof(float)));
+  CUDA_CHECK(cudaMalloc(&dout, outElems * sizeof(float)));
   CUDA_CHECK(cudaMemcpy(din, h.data(), h.size() * sizeof(float),
                         cudaMemcpyHostToDevice));
 

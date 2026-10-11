@@ -3,21 +3,21 @@ title: 编译器行为与 UB
 type: research
 status: draft
 created: 2026-10-08
-updated: 2026-10-08
+updated: 2026-10-11
 tags: [cuda, semantics, compiler, undefined-behavior, restrict, volatile, sm_89]
 related:
   - docs/plan/cuda-semantics-topic-map.md
-  - docs/research/04-memory-model.md
+  - docs/research/04-memory-consistency-model.md
   - docs/research/05-atomics.md
-  - docs/research/07-instructions-ptx.md
-  - docs/research/08-float-numerics.md
+  - docs/research/07-ptx-instruction-level.md
+  - docs/research/08-floating-point.md
 ---
 
 # 11 — 编译器行为与 UB
 
 > 域内定位：`docs/plan/cuda-semantics-topic-map.md` §11。
 > 目标机：**sm_89（Ada, RTX 4060 Laptop）**，**CUDA 12.8**，`nvcc V12.8.61`。
-> 实验源码与产物：`tmp/outputs/D11/`（`src/d11_demos.cu`、`src/run.ps1`、`sass-O3.txt`、`sass-G.txt`、`d11_demos.ptx`、`run-*.txt`）。
+> 实验源码：`experiments/EXP-0011-compiler-and-ub/scripts/`（`d11_demos.cu`、`run.ps1`）；产物：`tmp/outputs/D11/`（`sass-O3.txt`、`sass-G.txt`、`run-*.txt` 等，本机、未入库）。
 
 ## 一句话
 
@@ -52,7 +52,7 @@ CUDA C++ 编译器只对"符合语言语义的程序"做承诺；你一旦越过
 "我给两个指针都加了 `__restrict__` 让它跑快点" —— 如果这两个指针其实指向同一块内存，就是 UB，而优化器会**真的**利用它。
 
 ```cpp
-// tmp/outputs/D11/src/d11_demos.cu
+// experiments/EXP-0011-compiler-and-ub/scripts/d11_demos.cu
 __global__ void store_then_load_restrict(int* __restrict__ p,
                                          int* __restrict__ q, int* out) {
   q[0] = 42;          // 通过 q 写
@@ -84,13 +84,14 @@ $ d11_demos_G.exe restrict        # 即 -G -O0
 
 ```bat
 call "E:\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat"
-E:\NVIDIA\CUDA\v12.8\bin\nvcc.exe -O3 -lineinfo -arch=sm_89 -o d11_demos.exe   src\d11_demos.cu
-E:\NVIDIA\CUDA\v12.8\bin\nvcc.exe -G  -O0      -arch=sm_89 -o d11_demos_G.exe src\d11_demos.cu
-E:\NVIDIA\CUDA\v12.8\bin\nvcc.exe -O3 -arch=sm_89 -ptx -o d11_demos.ptx src\d11_demos.cu
+:: 在 experiments\EXP-0011-compiler-and-ub\scripts\ 下执行
+E:\NVIDIA\CUDA\v12.8\bin\nvcc.exe -O3 -lineinfo -arch=sm_89 -o d11_demos.exe   d11_demos.cu
+E:\NVIDIA\CUDA\v12.8\bin\nvcc.exe -G  -O0      -arch=sm_89 -o d11_demos_G.exe d11_demos.cu
+E:\NVIDIA\CUDA\v12.8\bin\nvcc.exe -O3 -arch=sm_89 -ptx -o d11_demos.ptx d11_demos.cu
 E:\NVIDIA\CUDA\v12.8\bin\cuobjdump.exe -sass d11_demos.exe > sass-O3.txt
 ```
 
-一键复现：`pwsh -File tmp\outputs\D11\src\run.ps1`。
+一键复现：`pwsh -File experiments\EXP-0011-compiler-and-ub\scripts\run.ps1`（产物写入 `tmp/outputs/D11/`）。
 
 ### 观察 A：`__restrict__` 让 load 跑到 store 前面
 
@@ -116,7 +117,7 @@ st.global.u32      [%rd6], %r1;   // q[0]=42
 ld.global.nc.u32   %r2,    [%rd5]; // p[0]：.nc = non-coherent 只读，可缓存
 ```
 
-`-G`（`sass-G.txt`）下则退化为通用 `ST.E` 后接 `LD.E`，顺序保留，所以结果是 42。**结论：`__restrict__` 不只是"少一次寄存器",它改变了编译器对别名与可见性的整个假设。**
+`-G`（`sass-G.txt`）下则退化为通用 `ST.E` 后接 `LD.E`，顺序保留，所以结果是 42。**结论：`__restrict__` 不只是"省一次访存"，它改变的是编译器对别名与可见性的整个假设。**
 
 ### 观察 B：`volatile` 不是原子（丢失更新）
 

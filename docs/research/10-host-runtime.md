@@ -3,7 +3,7 @@ title: 域 10 — 宿主侧运行时 / 启动语义
 type: research
 status: draft
 created: 2026-10-08
-updated: 2026-10-08
+updated: 2026-10-11
 tags: [cuda, semantics, runtime, launch, streams, error-handling, dynamic-parallelism, sm_89]
 related:
   - docs/plan/cuda-semantics-topic-map.md
@@ -95,7 +95,8 @@ kernel 能否正确执行、何时执行、和谁并发，都要到之后某个*
 - 两个 stream 之间**没有**顺序承诺：并排提交不保证按提交顺序跑。
 - 但 legacy default stream 会**强制串行**：default stream 上先放一个自旋 kernel，再用
   **blocking** stream 去写它等的标志位 → 标志位只能在自旋超时后才被写，自旋看到 `flag=0`
-  （被隐式串行化）；换成 **non-blocking** stream 才看到 `flag=1`。
+  （被隐式串行化）；换成 **non-blocking** stream 才看到 `flag=1`。自旋本身带 `clock64()`
+  时间上限（约 0.1 s），所以被串行化那一路是**超时退出**，不会一直空转。
 
 ```text
 blocking stream    : spin observed flag = 0   (被隐式同步串行化)
@@ -172,13 +173,14 @@ Function : _Z10deref_nullPi
   EXIT
 ```
 
-值得注意的是自旋 kernel 的 `volatile int*` 被编译成**系统级强访存**：
+值得注意的是自旋 kernel 的 `volatile int*` 被编译成**系统级强访存**（循环由 `clock64()` 计时收口）：
 
 ```text
 Function : _Z9spin_waitPViPix
-  LDG.E.STRONG.SYS R5, [R2.64]   ; volatile 全局读 -> strong, .sys scope
+  CS2R R4, SR_CLOCKLO            ; start = clock64() —— 自旋的时间上限
+  LDG.E.STRONG.SYS R0, [R2.64]   ; volatile 全局读 -> strong, .sys scope
   ...
-  @!P1 BRA P0, 0x60
+  @!P0 BRA P1, 0x50              ; 未超时 且 *flag==0 -> 回跳继续自旋
 ```
 
 （`-res-usage`：`deref_null` REG:8，`nop` REG:4；参数/栈用量见 `cuobjdump_resusage.txt`。）
@@ -212,22 +214,26 @@ dp_run: parent sync: no error / child wrote 42 (expect 42)
 
 ## 出处
 
-- **CUDA C++ Programming Guide**（当前文档 CUDA 13.4；以下语义自 12.x 起未变，本机 12.8 适用）
-  - §2.5 *Asynchronous Execution*
-    - §2.5.1 *What is Asynchronous Concurrent Execution?* —— 提交即返回，可能早于开始执行
-    - §2.5.2.2 *Launching Kernels in CUDA Streams* —— `<<<grid, block, shared_mem_size, stream>>>`
-    - §2.5.4.2 *Asynchronous Error Handling* —— get 清 / peek 不清；`CUDA_LAUNCH_BLOCKING=1`
-    - §2.5.5 *CUDA Stream Ordering* —— in-order streams
-    - §2.5.6.1 *Legacy Default Stream* / §2.5.6.2 *Per-thread Default Stream*
-    - §2.5.7 *Explicit Synchronization* / §2.5.8 *Implicit Synchronization*
-  - §2.1 *Intro to CUDA C++* → *Error State* / *Error Handling* —— 每 host 线程一份 error state；
-    launch 后 `cudaSuccess` 只证明 launch 合法
-  - §4（Special Topics）*CUDA Dynamic Parallelism*（§4.18；含 §4.18.2.4 *Ordering and Concurrency*）、
-    §2.7 *NVCC* → *Separate Compilation of GPU Code*（`-rdc=true -lcudadevrt`）
-  - §3（Advanced）*Multi-GPU Systems* —— 每 device 各有自己的 default stream
-- **PTX ISA 8.7**（本机 CUDA 12.8 自带；章节号沿用当前在线文档的编号）
-  - §11.2 *Specifying Kernel Entry Points and Functions*（`.entry` / `.func` / `.alias`）
-  - §11.4.2 `.maxntid`；§11.4.3 `.reqntid`；§11.4.4 `.minnctapersm`；§11.4.1 `.maxnreg`
+> 章节号按 **本机 CUDA 12.8** 的《CUDA C++ Programming Guide》与《PTX ISA 8.7》给出。
+> 编程指南在 13.x 期间改过编号（异步执行从 §3.2.8 挪到 §2.5），语义未变，但引用以 12.8 为准。
+
+- **CUDA C++ Programming Guide**（12.8）
+  - §3.2.8 *Asynchronous Concurrent Execution*
+    - §3.2.8.1 *Concurrent Execution between Host and Device* —— 提交即返回，可能早于开始执行
+    - §3.2.8.5 *Streams* —— `<<<grid, block, shared_mem_size, stream>>>`；in-order streams
+    - §3.2.8.5.2 *Default Stream* —— *Legacy Default Stream* 与 `--default-stream per-thread`
+    - §3.2.8.5.3 *Explicit Synchronization* / §3.2.8.5.4 *Implicit Synchronization*
+  - §3.2.12 *Error Checking* —— 每 host 线程一份 error state；get 清 / peek 不清；
+    `CUDA_LAUNCH_BLOCKING=1`（另见 §18 *CUDA Environment Variables*）；launch 后 `cudaSuccess`
+    只证明 launch 合法
+  - §3.2.9 *Multi-Device System* —— 每 device 各有自己的 default stream
+  - §9 *CUDA Dynamic Parallelism*（含 §9.2.1.5 *Ordering and Concurrency*、
+    §9.3.3.2 *Compiling and Linking*、§9.5 *CDP2 vs CDP1*）—— `-rdc=true -lcudadevrt`
+- **CUDA Compiler Driver NVCC**（12.8）—— `-rdc` / `-lcudadevrt` 与设备码分离编译。
+- **PTX ISA 8.7**（本机 CUDA 12.8 自带）
+  - §11.2 *Specifying Kernel Entry Points and Functions*（`.entry` / `.func`）
+  - §11.4 *Performance-Tuning Directives*：§11.4.1 `.maxnreg`；§11.4.2 `.maxntid`；
+    §11.4.3 `.reqntid`；§11.4.4 `.minnctapersm`
   - §5.1.6 *Parameter State Space*；§5.1.7 *Shared State Space*
 - **CUDA Runtime API Reference**：`cudaGetLastError` / `cudaPeekAtLastError` /
   `cudaFuncSetAttribute` / `cudaLaunchKernel` / `cudaStreamCreateWithFlags` / `cudaDeviceSynchronize`。

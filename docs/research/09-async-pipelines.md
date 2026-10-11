@@ -3,7 +3,7 @@ title: "域 09 · 异步与流水语义"
 type: research
 status: draft
 created: 2026-10-08
-updated: 2026-10-08
+updated: 2026-10-11
 tags: [cuda, semantics, async, streams, cp.async, pipeline, cuda-graphs, unified-memory, sm_89]
 related: [docs/plan/cuda-semantics-topic-map.md, experiments/EXP-0009-async-pipelines/README.md]
 ---
@@ -132,8 +132,8 @@ legacy 默认 stream 的隐式同步把两个 stream「缝」在了一起。这�
 ### 反例 C（★）——「`cp.async` 发出后 shared 立即可读」
 
 把 `__pipeline_wait_prior(0)` 去掉后再读 shared，是数据竞争（UB）。实测同一程序连跑 5 次：
-**首轮 256/256 元素错，之后 4 轮 0/256**。这恰好说明它是 race 而不是「稳定地错」：能不能对
-取决于 `cp.async` 的到达时机。SASS 侧的证据更直观 —— 正确版与去掉 wait 版只差一条等待：
+**首轮 256/256 元素错，之后 4 轮 0/256**。这恰好说明它是 race 而不是「稳定地错」：结果对不对
+取决于 `cp.async` 什么时候到达，所以只能保证"出错是合法的"，不能指望稳定复现。SASS 侧的证据更直观 —— 正确版与去掉 wait 版只差一条等待：
 
 ```
 cpasync_copy (正确)      : LDGSTS.E.BYPASS.128 → LDGDEPBAR → DEPBAR.LE SB0, 0x0 → BAR.SYNC → LDS.128
@@ -179,7 +179,7 @@ E:\NVIDIA\CUDA\v12.8\compute-sanitizer\compute-sanitizer.exe --tool racecheck as
 
 - **`props`**（`props.txt`）：24 个 SM；`asyncEngineCount=1`；`canMapHostMemory=1`；
   `unifiedAddressing=1`；`managedMemory=1`；`pageableMemoryAccess=0`；`l2CacheSize=32 MiB`。
-  （`concurrentKernels` 字段已废弃、恒为 1，不要拿它判断并发。）
+  （`concurrentKernels` 本机读 1；按指南 §3.2.8.2 它只是「设备**有没有**并发 kernel 能力」的查询位，不代表运行期实际能重叠多少——重叠与否取决于资源占用，别拿它判断并发。）
 - **`streams`**（`streams.txt`）：1 stream 529.9 ms / 4 streams 118.8 ms → **4.46×**。
 - **`ds`**（`default-stream-legacy.txt` / `default-stream-perthread.txt`）：**1.99 vs 1.04**。
 - **`memcpy`**（`memcpy.txt`）：pageable **33.19 ms** vs pinned **0.013 ms**。

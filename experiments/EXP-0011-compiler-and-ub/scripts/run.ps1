@@ -2,7 +2,7 @@
 # Usage: pwsh -File run.ps1
 $here  = $PSScriptRoot
 $repo  = Split-Path (Split-Path (Split-Path $here -Parent) -Parent) -Parent
-$out   = Join-Path $repo 'tmp\outputs\EXP-0011\2026-10-08'
+$out   = Join-Path $repo 'tmp\outputs\D11'
 $src   = Join-Path $here 'd11_demos.cu'
 $exe   = Join-Path $out 'd11_demos.exe'
 $exeG  = Join-Path $out 'd11_demos_G.exe'

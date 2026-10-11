@@ -1,4 +1,4 @@
-id: EXP-0002
+id: EXP-0006
 slug: synchronization
 title: 同步原语 —— __syncthreads / __syncwarp / 命名屏障 的边界
 arch: sm_89

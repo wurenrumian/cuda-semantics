@@ -14,8 +14,8 @@ hero:
       link: /experiments/
 
 features:
-  - title: 12 个语义域
-    details: 从 SIMT 到内存一致性，每篇都含「承诺与边界 / 反例 / 本机可复现验证 / 出处 / 未决」。
+  - title: 环境基线 + 12 个语义域
+    details: 先钉死本机基线（sm_89 的语义天花板），再从 SIMT 到内存一致性；每篇都含「承诺与边界 / 反例 / 本机可复现验证 / 出处 / 未决」。
   - title: 实机可跑
     details: 实验定义与最小脚本随仓库；本机 runner 让页面直接执行并把输出回显。
   - title: 本机部署

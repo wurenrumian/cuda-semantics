@@ -1,7 +1,7 @@
 # D04 memory-consistency runner: build + run probes + PTX/SASS + sanitizer.
 # Usage: pwsh -File run.ps1
 $src  = $PSScriptRoot
-$root = (Resolve-Path (Join-Path $src '..\..\..\tmp')).Path         # src -> D04 -> outputs -> tmp
+$root = (Resolve-Path (Join-Path $src '..\..\..\tmp')).Path         # scripts -> EXP-0004 -> experiments -> repo, then \tmp
 $out  = Join-Path $root 'outputs\D04\2026-10-08'
 New-Item -ItemType Directory -Force -Path $out | Out-Null
 

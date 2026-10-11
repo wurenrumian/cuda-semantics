@@ -3,7 +3,7 @@ title: 域 12 — 架构 / 微架构相关的语义
 type: research
 status: draft
 created: 2026-10-08
-updated: 2026-10-08
+updated: 2026-10-11
 tags: [cuda, semantics, architecture, microarchitecture, sm_89, ada, sass, occupancy, shared-memory, coalescing, sector]
 related:
   - docs/plan/cuda-semantics-topic-map.md
@@ -24,14 +24,14 @@ related:
 
 ## 一句话
 
-CUDA 语义分两层：**ISA（PTX / CUDA C++ 抽象机）承诺的**，和**具体架构实现决定的**；本域的全部坑就在"把后一层当承诺用"——warp 大小是 ISA 常量，而 SM 数、每 SM 资源上限、block→SM 的落法、SASS 指令序列、访存代价、原子吞吐，都是**可查询 / 可观测的架构事实**，换一块 GPU 就可能改。
+CUDA 的语义分两层：一层是 **ISA（PTX / CUDA C++ 抽象机）承诺的**，跨架构不变；另一层由**具体架构实现决定**，换一块 GPU 就可能改。本域的坑几乎都来自"把后一层当承诺用"：warp 大小（32）是 ISA 常量，而 SM 数量、每 SM 的资源上限、block 落到哪个 SM、SASS 指令序列、访存代价、原子吞吐，全都只是**可查询 / 可观测的架构事实**。
 
 ## 承诺与边界
 
 ### ISA 层：可以依赖的
 
 - **warp = 32 线程**：`warpSize == 32`，跨架构固定，是 ISA 常量。
-- **PTX 前向兼容，cubin 架构特化**：为 `compute_XY` 生成的 PTX 可由更新驱动 JIT 到未来架构；**cubin** 只在"同 major、minor ≥"范围内二进制兼容，跨 major（如 sm_75 → sm_89）不能直接加载。
+- **PTX 前向兼容，cubin 架构特化**：为 `compute_XY` 生成的 PTX 可由更新驱动 JIT 到未来架构；而 **cubin** 只在"同一 major、目标 minor ≥ 编译时 minor"的范围内二进制兼容，跨 major（如 sm_75 → sm_89）不能直接加载。
 - **`.target` / `-arch` 门控指令可用性**：某条指令在某架构上"存不存在"由编译目标决定（例：`cp.async` 要求 sm_80+；TMA / tensormap 要求 sm_90a）。这是**硬边界**：低于门槛则编译期报错，而不是运行期行为差异。
 - **抽象机语义不随架构变**：域 01–11 的执行模型 / 内存模型 / 原子性 / 同步承诺，在任何 `sm_XY` 上一样成立。
 
@@ -56,7 +56,7 @@ CUDA 语义分两层：**ISA（PTX / CUDA C++ 抽象机）承诺的**，和**具
 
 - **`maxThreadsPerMultiProcessor` 不是 2048**：Ada（8.9）是 1536，occupancy 上限天然低于 Ampere 的 2048。
 - **"硬件有 100 KB shared/SM" ≠ "一个 block 能用 100 KB 静态 shared"**：静态 `__shared__` > 48 KB 编译期就被 ptxas 拒绝；要到 101376 B 必须写**动态** shared 并 `cudaFuncSetAttribute(..., MaxDynamicSharedMemorySize, ...)` opt-in。
-- **`-arch=sm_89a` / `-arch=sm_89f` 不是随处可用的后缀**：`a` = architecture-specific（仅该 compute capability），`f` = family-specific（同 family 内可用）；后缀与架构的有效组合随 toolkit / 架构而定，本机 nvcc 12.8 两者都拒绝。
+- **`-arch=sm_89a` / `-arch=sm_89f` 不是随处可用的后缀**：`a` = architecture-specific（只对那一个 compute capability 可用），`f` = family-specific（同一 GPU family 内可用）；后缀和架构的合法组合随 toolkit / 架构而变。本机 nvcc 12.8 两者都拒绝，而且 12.8 连 `sm_100f` 也不认——`f` 后缀在这个版本里还没落地。
 - **SASS 不是语义契约**：同一份 CUDA C++ 在不同 `-arch` 下落到**不同指令序列**；SASS 是各架构实现，不是 ISA 承诺。
 - **访存代价、原子吞吐、bank 冲突、占用率曲线是"性能语义"**：能测、会随架构变，**不能**写成正确性假设。
 
@@ -64,7 +64,7 @@ CUDA 语义分两层：**ISA（PTX / CUDA C++ 抽象机）承诺的**，和**具
 
 ### 反例一（主）：以为"同算法 ⇒ 同机器码"——同一 kernel 跨 sm_75/80/89 的 SASS 不同
 
-"我就是调了个 `atomicAdd` 罢了，SASS 能差到哪去" —— 实际上连指令都换了。同一个 `atom_probe`（共享内存 `atomicAdd`）在三个目标下（`sass_sm_{75,80,89}.txt`）：
+"我就是调了个 `atomicAdd` 罢了，SASS 能差到哪去" —— 实际上连指令都换了。同一个 `atom_probe`（共享内存 `atomicAdd`）在三个目标下（`sass_sm_{75,80,89}.txt`），按指令类别对齐摘录如下（省略了重复的屏障行，不是逐行原样）：
 
 ```
 sm_75 :  @!P0 STS [RZ], RZ ;   ATOMS.ADD RZ, [RZ], R0 ;        BAR.SYNC 0x0 ;                LDS.U R0, [RZ] ;   STG.E.SYS [UR4], R0 ;
@@ -72,7 +72,7 @@ sm_80 :  @!P0 STS [RZ], RZ ;   ATOMS.POPC.INC.32 RZ, [URZ] ;   BAR.SYNC.DEFER_BL
 sm_89 :  （与 sm_80 相同）
 ```
 
-- 共享原子：**`ATOMS.ADD`（Turing）→ `ATOMS.POPC.INC.32`（Ampere+）**，操作数也从普通寄存器变成 uniform 寄存器 `URZ`。
+- 共享原子：**`ATOMS.ADD`（Turing）→ `ATOMS.POPC.INC.32`（Ampere+）**——Ampere 多了条"按活跃掩码 popcount 递增"的原子指令，寻址也从普通寄存器换成 uniform 寄存器 `URZ`。
 - 屏障：`BAR.SYNC` → `BAR.SYNC.DEFER_BLOCKING`。
 - 只读访存 / 写回的作用域标注：`LDG.E.CONSTANT.SYS`、`STG.E.SYS`（sm_75）→ `LDG.E.CONSTANT`、`STG.E`（sm_80/89）。
 
@@ -99,6 +99,8 @@ strided  : 0.1790 / 0.1790 ms/iter        ≈ 10–13×
 
 原因在 32B sector 粒度：连续 warp 触碰 4×32B，跨步 warp 每个 lane 各自一个 sector。**这条只能当"性能语义"用**——由架构 / 访存层级决定、随架构变；把它当成"跨步一定慢 10 倍"写进正确性推理，就是另一类错。
 
+（**口径提醒**：两种模式读的元素数一样，但**工作集不一样**——连续只碰前 4 MB（能常驻 32 MB 的 L2），跨步要碰满 128 MB（基本走显存）。所以这个 10–13× 里还混着"L2 命中 vs 走 DRAM"的成分，不是纯粹的 sector 计数对比；要分离二者得看 `ncu` 的 sector 计数器，而本机拿不到。）
+
 （还有一条同属"环境 / 权限语义"的坑：`ncu` 读合并访存计数器在本机被拒，见下。）
 
 ## 本机验证（命令 + 观察）
@@ -124,7 +126,7 @@ block= 640 ->  2 block/SM = 1280 threads/SM ( 83.3%)
 block=1024 ->  1 block/SM = 1024 threads/SM ( 66.7%)
 ```
 
-`%smid`：launched 192 blocks × 128 threads on a 24-SM device → `distinct SMs observed: 24`，`smid range: [0, 23]`。block 会被摊到各 SM，但**"哪个 block 落到哪个 SM"不是承诺**。
+`%smid`：launched 192 blocks × 128 threads on a 24-SM device → `distinct SMs observed: 24`，`smid range observed: [0, 23]`。block 会被摊到各 SM，但**"哪个 block 落到哪个 SM"不是承诺**。
 
 ### 观察 B：静态 shared 上限 vs 动态 opt-in（`build-static_over.log`、`arch_probe.out`）
 
@@ -173,6 +175,8 @@ cuobjdump -sass sass_probe_sm_75.cubin > sass_sm_75.txt     # 同理 sm_80 / sm_
 -arch=sm_90a : OK（生成 sm_90a cubin）
 ```
 
+同一次实测里 `sm_100f` 也被拒：`nvcc fatal : Unsupported gpu architecture 'sm_100f'`。可见 12.8 认不出 `f` 族后缀，并不是只对 Ada 拒绝。
+
 ### 观察 F：合并访存计时 + ncu 权限（`coalesce-*.txt`、`ncu-*.txt`）
 
 ```
@@ -184,7 +188,7 @@ ncu --metrics l1tex__t_requests_pipe_lsu_mem_global_op_ld.sum,... coalesce_probe
             GPU Performance Counters on the target device 0.
 ```
 
-**注意：** 合并访存的"sector 级"证据本机**没拿到**（计数器权限被拒），只有秒级墙钟差异；32B sector 是文档层语义，本次只是与之**定性一致**的观察，不是直接证明。
+**注意：** 合并访存的"sector 级"证据本机**没拿到**（计数器权限被拒），只有毫秒级的墙钟差异；32B sector 是文档层语义，本次只是与之**定性一致**的观察，不是直接证明。
 
 ## 出处
 
@@ -213,8 +217,8 @@ ncu --metrics l1tex__t_requests_pipe_lsu_mem_global_op_ld.sum,... coalesce_probe
 
 ## 未决
 
-- **ncu 计数器被权限阻断（ERR_NVGPUCTRPERM）**：拿不到 `l1tex__t_sectors_pipe_lsu_mem_global_op_ld.sum` 等，合并访存只有墙钟证据。要与文档的 32B sector 语义闭环，需管理员开 GPU Performance Counters 权限（NVIDIA 控制面板 / `NVreg_RestrictProfilingToAdminUsers`）。
-- **sm_89a / sm_89f 的拒绝是 CUDA-12.8 的实测**；`f` 族后缀随 toolkit 版本演进，未验证更新版（如 12.9+）对 Ada 的族目标定义，也未列全"哪些 (arch, suffix) 组合合法"的矩阵。
+- **ncu 计数器被权限阻断（ERR_NVGPUCTRPERM）**：拿不到 `l1tex__t_sectors_pipe_lsu_mem_global_op_ld.sum` 等，合并访存只有墙钟证据。要让观察和文档的 32B sector 语义对上，需管理员开 GPU Performance Counters 权限（NVIDIA 控制面板 / `NVreg_RestrictProfilingToAdminUsers`）。
+- **sm_89a / sm_89f 的拒绝是 CUDA-12.8 的实测**，而且 12.8 对任何 `f` 后缀都拒绝（连 `sm_100f` 也是）——所以「出处」里引的 `compute_100f` / `compute_100a` 示例来自比 12.8 更新的在线版指南。至于更新版（如 12.9+）对 Ada 的族目标怎么定义、哪些 (arch, suffix) 组合合法，本机未验证。
 - **cubin vs PTX 的加载行为未直接跑**：sm_75 cubin 拿到 sm_89 上应因 "no kernel image" 失败、而 PTX 可 JIT——目前只有 doc 依据，未实测（可作为秒级小验证补上）。
 - **shared carveout（L1/shared 可配置划分）未探**：可用 `cudaFuncAttributePreferredSharedMemoryCarveout` 观察；本次只动了 shared 上限。
 - **SM 内 sub-partition 结构未直接观测**：scheduler 数、每 scheduler 的 warp 槽位、寄存器文件分区——需要 ncu 的 scheduler 指标（被权限阻断）。

@@ -110,7 +110,36 @@ extern __shared__ char smem[];                  // device 侧一块未定型的�
 
 对 occupancy 的账本来说，**静态和动态是同一个池子**：`cudaOccupancyMaxActiveBlocksPerMultiprocessor`
 会把你传的 `dynamicSMemSize` 加到静态占用上一起算。所以在估算常驻块数时，别忘了把动态部分也报进去。
-（`cudaFuncSetAttribute` 提升超过 48 KB 的动态 shared memory 属于配置细节，这里不展开。）
+
+实测（2026-10-11，`experiments/EXP-0002-thread-hierarchy/scripts/dyn_smem.cu` +
+`run_dyn_smem.ps1`，产物 `tmp/outputs/D02/2026-10-11/dyn-smem/`；block=128，本机 smem 100 KB）：
+
+| kernel | 传入的 dynBytes | blocks/SM | 说明 |
+|---|---|---:|---|
+| `k_static16k`（16 KB 静态） | 0 | **5** | `static + ~1KB 预留` ≈ 17 KB/块 → 5 块 |
+| `k_dyn16k`（16 KB 动态） | **0（漏报！）** | **12** | API 只按 128 线程算 → 显著高估 |
+| `k_dyn16k` | 16384（如实） | **5** | 与静态同池：一样的 5 块 |
+| `k_dyn16k_lb<8>`（`__launch_bounds__(128,8)`） | 16384 | 5 | bounds 压不动 17 KB/块的 smem 上限 |
+| `k_dyn16k_lb<8>` | 0（漏报） | 12 | 同上高估 |
+
+两个结论，一个比预想细：
+
+1. **静态/动态确实同池**：同一 16 KB 一进一出，blocks/SM 都是 5。
+2. **三个坑**：
+   - **漏报 dynBytes 会把估算刷成"线程到顶"的 12**——occupancy API 到底怎么算完全取决于你传的字节数；
+     漏传不是"保守"，是**完全错误**的方向（真实只有 5，账面 12）。
+   - 反例 3 讲过 `minBlocksPerMultiprocessor` 是**下界**不是上限：`__launch_bounds__(128,8)` 请求"至少 8"，
+     本机 dyn=0 实测给出 **12**——比请求的还多，因为请求只锁最低常驻，不封顶。
+   - 但动态 shared memory 路径上 smem 是硬上限（17 KB/块 → 最多 5，见第三行）；bounds **救不回**，
+     "压寄存器腾块数"的招数在 smem 瓶颈处完全失效。（本 kernel 寄存器本身不高，12 regs、0 spill，
+     所以 bounds 也没有 squeeze 的余地——这正说明 smem 瓶颈只能靠减 smem 或减 block 大小解决。）
+
+顺手记一个**与语义无关但很坑的工具链事实**：nvcc 在本 Windows 环境按 GBK 代码页预处理 UTF-8 源码，
+**字符串结尾若是全角字符**（`）`、`;` 等），其 GBK 第二字节 + 结尾 `"` 会被当成一个占两位的"字符"，
+引号被吞，报 `missing closing quote`；同理全角字符**紧跟 `\n` 转义**时，`\` 被吞进多字节解析，
+运行期打出字面 `\n`。
+规避规则：**C/C++ 字符串（含 puts/printf 格式串）的最后一个字符落在 ASCII 上**，全角内容留中间。
+（`d01_simt.cu` / `memmodel_demo.cu` 等既有文件字符串都以 ASCII 收尾，一直没有踩过。）
 
 ## 反例
 

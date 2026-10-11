@@ -233,7 +233,38 @@ pwsh -File experiments\EXP-0001-simt-execution-model\scripts\run.ps1
 | 无同步的邻居读 | `STS [R5], R0` → `LDS R7, [R4]`（无 `WARPSYNC`） | 竞争 |
 | 发散循环后的时钟 | `BSYNC B1`（@0x510）→ `CS2R R4, SR_CLOCKLO`（@0x520） | 时钟在收敛点之后 |
 
+### 观察 4：`__activemask()` 的正当用法——「发现模式」（2026-10-11 补，闭合未决 ⑤）
+
+反例 A 证明 `__activemask()` **不能**当跨发散边的逻辑 mask；但它**有**一个与 cooperative groups
+实现一致的正当用法（Discovery Pattern）：在**同一个发散分支内部**，快照 + 分支屏障 + 再快照，
+循环到两次快照相等，得到"分支内公认的成员集合"；此后该集合内的通信（源 lane 一定在集合里）是良定义的。
+
+`experiments/EXP-0001-simt-execution-model/scripts/activemask_good.cu`（同目录 `run_activemask_good.ps1`，
+产物 `tmp/outputs/EXP-0001/2026-10-11/activemask-good/`）：
+
+```cpp
+if (lane & 1) return;                 // 偶数 lane 的发散分支（与反例 A 同形状）
+unsigned m0, m1;
+do  {                                  // 发现：快照 -> __syncwarp(快照) -> 再快照
+    m0 = __activemask();
+    __syncwarp(m0);
+    m1 = __activemask();
+} while (m0 != m1);                    // 稳定 = 分支内的公认参与集合
+int x = __shfl_sync(m1, v, (lane + 2) & 31);   // 通信只发往/来自集合内的 lane
+```
+
+实测（`discovery`）：mask 稳定在 **`0x55555555`**（16 个偶 lane）、popc=16、
+每个偶 lane 都从 `(lane+2)&31`（仍是偶数、仍在 mask 内）拿到 `(lane+2)*10`，**0 错**；
+wrap（lane 30 → lane 0）也正确。对照 `baseline`（不用 activemask：全员 `__ballot_sync`/`__shfl_sync(mask=全员)`，
+谓词只决定"记不记"）同样 0 错——它才是"想跨出分支取社区外数据"时的正确姿势。
+
+**边界总结**（这层心智模型可以挂进正文）：
+- 发散分支**内部**，成员互相通信 → Discovery 模式（快照 + 屏障 + 通信都在同一集合内）合法。
+- 想跨出发散边界（比如读**没进分支的**奇数 lane）→ activemask 无能为力（反例 A）；
+  唯一安全做法是**先收敛**（把 intrinsic 移到分支外 / 全员参与版本），正如 baseline 的写法。
+
 ### 环境旁证（重要）
+
 
 - `ncu`（Nsight Compute 2025.1.0）能连接进程并运行目标，但收集指标报
   `ERR_NVGPUCTRPERM`（当前用户无 GPU 性能计数器权限；需管理员或 `RmProfilingAdminOnly=0`）。
@@ -281,5 +312,8 @@ pwsh -File experiments\EXP-0001-simt-execution-model\scripts\run.ps1
    待查：这种情况是否可靠（还是本例的巧合）。旧的 `tmp/outputs/D01/logs/sass-k_reduce_sync.txt` 是加 guard 之前的，尚未按新源重新生成。
    对照：`k_sass` 里同一写法确实生成了显式 `WARPSYNC`。
 4. **可否构造一个非计时的 ITS 可观测演示**：例如早完成的 lane 在 `BSYNC` 之前先写一个标志，让别的 lane 读到——用来把"独立推进只到收敛点"变成可打印的证据。
-5. **反例 A 修正**：`__activemask()` 的一个**正当**用途（cooperative groups "Discovery Pattern"）与本文陷阱的边界，留待域 6（同步原语）交叉。
+5. **（已闭合，2026-10-11）`__activemask()` 的正当用途**：Discovery Pattern 已实测（「观察 4」；
+   `activemask_good.cu`）——发散分支内"快照→分支屏障→稳定集合→集合内通信/源 lane 在集合内"合法；
+   跨出发散边界的通信仍必须先收敛。与域 6 的交叉点（cooperative groups 如何用同一模式实现
+   `coalesced_active`）留待域 6 展开。
 6. 与 **EXP-0001** 的关系：本域实验即 `experiments/EXP-0001-simt-execution-model/`（源 `d01_simt.cu`），"邻居读竞争 / ITS / `__syncwarp`"已做实，本文证据来自它。

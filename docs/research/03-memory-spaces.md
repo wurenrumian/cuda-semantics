@@ -265,6 +265,20 @@ compute-sanitizer --tool memcheck .\mem_spaces.exe oob   # 越界读 8-float loc
 预期（本机**未观测到**，见下）：报 `Invalid __local__ read`（证明 local 是有界、每线程的真实内存区域）。
 本机实测：`Error: Target application terminated before first instrumented API call`。连 NVIDIA 自带的 `compute-sanitizer\sanitizer_smoke.exe` 都报同样错误 → **本机 sanitizer 无法注入**；`ncu` 也因 `ERR_NVGPUCTRPERM` 取不到计数器。两者在 Windows 上都需管理员权限（`EnableDebuggerInterface.bat` / `RmProfilingAdminOnly=0`），不在本 worker 权限内。本域结论不依赖它即可成立（见「未决」）。
 
+### 观察 7：compute-sanitizer 复跑（2026-10-11，Windhawk 解锁后）
+
+`memcheck --tool memcheck mem_spaces.exe oob`（产物 `tmp/outputs/sanitizer-2026-10-11/d03-memcheck-oob.txt`）：
+
+```
+========= Invalid __local__ read of size 4 bytes
+=========     at opaque_read(...)+0x1a0 in mem_spaces.cu:136
+=========     by thread (0,0,0) in block (0,0,0)
+=========     Address 0xfffda0 is out of bounds
+```
+
+正是当初预期的 `Invalid __local__ read`——local 是**有界的、每线程一份的真实内存区域**，从工具层证实。
+（test 环境注：曾因 Windhawk 注入冲突全灭，见 02/04 篇与过程记忆；与本域结论无关。）
+
 ## 出处
 
 **CUDA C++ Programming Guide（v12.8, docs.nvidia.com/cuda/archive/12.8.0/cuda-c-programming-guide/）**
@@ -287,7 +301,11 @@ compute-sanitizer --tool memcheck .\mem_spaces.exe oob   # 越界读 8-float loc
 
 ## 未决
 
-- **compute-sanitizer 本机不可注入**（driver 596.49 与 sanitizer 2025.1.0 组合；自带 smoke 亦失败）。需管理员执行 `compute-sanitizer\EnableDebuggerInterface.bat` 或换匹配版本后，复测 local OOB 的 `memcheck`（预期 `Invalid __local__ read`）。
+- **（已解决，2026-10-11）local OOB 的 memcheck**：根因是 **Windhawk 进程注入冲突**（详见过程记忆
+  `tmp/docs/memory/windows-toolchain-pitfalls.md`；与驱动/权限无关）。停 Windhawk 后复跑
+  `memcheck --tool memcheck mem_spaces.exe oob` → **`Invalid __local__ read of size 4 bytes ... out of bounds`**
+  （带行号与 host 回溯，正是 03 反例 1「local 是有界、每线程的真实内存区域」的直接证据）。
+  产物 `tmp/outputs/sanitizer-2026-10-11/d03-memcheck-oob.txt`。
 - **ncu 计数器权限缺失**（`ERR_NVGPUCTRPERM`）。bank conflict（`l1tex__data_bank_conflicts_*`）、L1/TEX 命中需 `RmProfilingAdminOnly=0` 或管理员；本稿 bank conflict 只有 timing 级证据。
 - local vs shared 的延迟差距被循环开销稀释（1.18×）；更干净的测法（多条独立链 / 批处理）待补齐。
 - texture 只覆盖了 `__ldg` 只读通路；真实 **texture object / sampler** 路径（线性插值、边界模式等）未做。

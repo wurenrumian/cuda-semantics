@@ -50,7 +50,7 @@ related: ["experiments/EXP-0000-baseline", "docs/plan/cuda-semantics-topic-map.m
 
 ### 不承诺（想当然就会错的地方）
 
-- **工具装了 ≠ 本机能用**：`compute-sanitizer` 与 `ncu` 在 Windows 需要管理员 / 调试接口权限。本机实测 `ncu` 报 `ERR_NVGPUCTRPERM`、`compute-sanitizer` 报 *"Target application terminated before first instrumented API call"*。→ racecheck / synccheck / initcheck 的验证因此受阻（域 04/06/11 的公共阻塞项）。
+- **工具装了 ≠ 本机能用**（2026-10-11 部分解锁）：`compute-sanitizer` 曾长期报 *"Target application terminated before first instrumented API call"*——根因最终查明为 **Windhawk 进程注入冲突**（每个新进程被注入 `windhawk.dll`，与 sanitizer 注入在 ntdll 撞车），停 Windhawk 服务即恢复（细则见过程记忆 `tmp/docs/memory/windows-toolchain-pitfalls.md`；Windhawk 重启自启，跑 sanitizer 前需再停）。`ncu` 仍报 `ERR_NVGPUCTRPERM`（GPU 计数器权限，需管理员或 `RmProfilingAdminOnly=0`），与 Windhawk 无关。
 - **「Ada 支持 Ada 的全部特性」是错的**：架构级新特性通常先被 gate 在更高的 arch 上（如 Hopper 特性要 `sm_90a`），`-arch=sm_89` 编不过。判据是「`-arch=sm_89` 能否编过，以及 PTX/SASS 是否真出现该指令」，不是显卡代号的宣传词。
 - **「PyTorch 能跑 = 我懂 CUDA 语义」是错的**：`torch.cuda.is_available()` 只说明驱动 / 运行时 / toolkit 三者版本自洽，与任何语义承诺无关。
 - **版本是耦合的**：驱动 596.49 ↔ toolkit 12.8 ↔ torch 2.11.0+cu128 三者互相约束；单独改一个可能让另一侧失效（例如把 toolkit 换成更高版而驱动不匹配）。
@@ -60,7 +60,7 @@ related: ["experiments/EXP-0000-baseline", "docs/plan/cuda-semantics-topic-map.m
 | 类别 | 本机可否实机验证 |
 |---|---|
 | ITS / active mask / 重汇聚（域 01） | ✅ 可（SASS `BSSY/BSYNC/WARPSYNC`） |
-| 内存模型 / 原子 / fence（域 04/05） | ✅ 可，但 racecheck 类证据受 admin 阻塞 |
+| 内存模型 / 原子 / fence（域 04/05） | ✅ 可（racecheck 类证据 2026-10-11 已解锁；注意 racecheck 只查 shared memory） |
 | `cp.async` + 流水（域 09） | ✅ 可（sm_80+） |
 | TMA / `cp.async.bulk` / cluster / DSMEM（域 06/09/12） | ❌ 仅概念（sm_90） |
 | 128-bit 原子 `.b128`（域 05） | ❌ 仅概念（sm_90） |

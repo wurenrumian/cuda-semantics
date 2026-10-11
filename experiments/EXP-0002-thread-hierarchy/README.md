@@ -76,3 +76,4 @@ __global__ void barrier_deadlock(int *out) {
 | 2026-10-08 | run.ps1（build → sched → occupancy → sass → synccheck） | `tmp/outputs/D02/2026-10-08/` |
 | 2026-10-11 | run.ps1（加了逐进程看门狗；新增 bounded `barrier` 演示） | `tmp/outputs/D02/2026-10-08/` |
 | 2026-10-11 | run_dyn_smem.ps1（动态 shared memory × launch_bounds 同池验证） | `tmp/outputs/D02/2026-10-11/dyn-smem/` |
+| 2026-10-11 | compute-sanitizer synccheck `barrier` + memcheck `sched`（Windhawk 停服后解锁，均 0 errors） | `tmp/outputs/sanitizer-2026-10-11/d02-*.txt` |

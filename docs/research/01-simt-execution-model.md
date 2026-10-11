@@ -157,7 +157,10 @@ int n = sh[lane ^ 1];   // 赌"邻居已经写完了"
 看似没问题——但这是**数据竞争（UB）**，不是保证。SASS 佐证：`sass-k_neighbor_unsync.txt` 里 `STS [R5], R0` 之后紧接 `LDS R7, [R4]`，**中间没有任何 `WARPSYNC`**。
 **教训**：UB 的表现是"可能看起来对"，不能靠"跑很多次都对"来证明正确；这类旧代码必须补 `__syncwarp()`。
 
-> 本想用 `compute-sanitizer --tool racecheck` 把 A/C 的竞争/掩码问题直接证出来，但**本机 sanitizer 注入失败**（见「未决」）。这里以行为 + SASS 为准。
+> 2026-10-11 解锁:本机注入失败的根因是 Windhawk 进程注入冲突(见 `tmp/` 侧环境坑记录)。
+> 停 Windhawk 服务后 `racecheck` 复跑:`race-unsync` 直接报 **`Race reported between Write access
+> at k_neighbor_unsync+0x80 (d01_simt.cu:76) and Read access at +0xa0 (d01_simt.cu:77), 128 hazards`**——
+> 反例 C 被工具直接证实;对照组 `race-sync` **0 hazards**。产物 `tmp/outputs/sanitizer-2026-10-11/d01-racecheck-*.txt`。
 
 **一个容易读歪的旁证**：本机某些 kernel 的 SASS 里**看不到** `WARPSYNC`（比如控制流完全收敛时，编译器会把 `__syncwarp()` 消掉，或直接展开成谓词直线代码）。
 这只说明**这一次**编译器证明了收敛、替你省掉了这条指令；**不代表**编程模型取消了同步要求。
@@ -303,9 +306,13 @@ wrap（lane 30 → lane 0）也正确。对照 `baseline`（不用 activemask：
 
 ## 未决
 
-1. **compute-sanitizer 本机不可用**（最高优先）：注入失败，导致「反例 A/C」的竞争/掩码问题**没有**被工具直接证实。
-   待查：是否需管理员 / `EnableDebuggerInterface` 已为 1 / 是否是 driver 596.49 与 sanitizer 2025.1.0 不兼容 / 安全软件拦截注入。
-   逐条证据：`tmp/outputs/D01/logs/racecheck-*.txt`、`synccheck-*.txt`、`memcheck-*.txt`。
+1. **（已解，2026-10-11）compute-sanitizer 本机不可用**：根因不是权限/注册表，而是 **Windhawk 进程注入冲突**
+   （每个新进程被注入 `windhawk.dll`，与 sanitizer 注入在 ntdll 撞车；停 Windhawk 服务后恢复，
+   详见过程记忆 `tmp/docs/memory/windows-toolchain-pitfalls.md`）。
+   已补跑 `racecheck`：`race-unsync` → **RAW hazard ×128**（d01_simt.cu:76/77，反例 C 被工具证实）、
+   `race-sync` → 0 hazards（对照），产物 `tmp/outputs/sanitizer-2026-10-11/d01-racecheck-*.txt`。
+   遗留，反例 A 的 `shfl-bad` 掩码问题 racecheck 不查（它只管 shared memory hazard）；
+   掩码类问题仍以"调用点形状 + SASS 无 `WARPSYNC`"为证。注意：Windhawk 重启会自启，跑 sanitizer 前需再停。
 2. **`ncu` 指标权限**：`ERR_NVGPUCTRPERM`。若拿到管理员，可采 branch-efficiency / divergence 指标作为域 1/12 的量化旁证。
 3. **`reduce-sync` 的 SASS 里没有逐迭代 `WARPSYNC`，但结果正确**。加 guard 后重新核对（`cuobjdump -sass -fun _Z13k_reduce_syncPi`）：SASS 中没有 `WARPSYNC`、`BSSY`、`BSYNC`，5 步被展开成带谓词的直线代码（`@!P0 LDS/STS`）。
    也就是说，nvcc 因为控制流完全收敛，把 `__syncwarp()` 消去了；步间顺序靠的是生成的代码，而不是编程模型的保证。

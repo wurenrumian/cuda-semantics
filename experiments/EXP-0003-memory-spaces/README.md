@@ -44,7 +44,7 @@ done（2026-10-08 首轮）
 - **H3 支持**：shared stride=1 1.95ms vs stride=32 8.74ms（≈4.5x，32 路 bank conflict；2026-10-08 首测 4.10/20.05ms → 4.9x，绝对值随时钟状态浮动）。
 - **H4 支持**：constant broadcast ≈15.2ms vs divergent ≈39.3ms（≈2.6x；首测 35.16/91.55ms → 2.6x）；SASS broadcast=`ULDC`（uniform 通路），divergent=`LDC`。
 - **H5 支持**：global stride=1 0.5ms vs stride=32 6.0ms（≈12x，32MB 工作集、65536 线程；2026-10-08 首测 0.36/9.95ms → 27.6x，绝对值随时钟状态浮动、量级不变）；小 buffer 时差距被缓存掩盖。
-- **sanitizer 未取到**：本机 `compute-sanitizer` 无法注入（连自带 `sanitizer_smoke.exe` 都报 `Target application terminated before first instrumented API call`）；`ncu` 计数器 `ERR_NVGPUCTRPERM`。两者都需管理员权限。
+- **（更新 2026-10-11）sanitizer 已通**：此前注入失败根因是 Windhawk 进程注入冲突（非权限）；停 Windhawk 后 `memcheck oob` 正面报出 `Invalid __local__ read ... out of bounds`，产物 `tmp/outputs/sanitizer-2026-10-11/d03-memcheck-oob.txt`。`ncu` 计数器权限（ERR_NVGPUCTRPERM）仍待管理员。
 
 ## 结论
 
@@ -54,7 +54,7 @@ done（2026-10-08 首轮）
 
 ## 未决
 
-- compute-sanitizer 注入失败（driver 596.49 + sanitizer 2025.1.0）；需管理员跑 `EnableDebuggerInterface.bat`，或换版本后复测 local OOB 的 memcheck。
+- compute-sanitizer 注入失败问题已在 2026-10-11 解决（Windhawk 注入冲突；见 doc 03「观察 7」与 `tmp/outputs/sanitizer-2026-10-11/`）。`ncu` 计数器权限仍待管理员。
 - ncu bank-conflict / L1 指标需 `RmProfilingAdminOnly=0` 或管理员。
 - texture object / sampler 路径未做（仅覆盖 `__ldg` 只读通路）。
 - register→local spill 阈值、L1/共享内存 carveout 归域 2/12。

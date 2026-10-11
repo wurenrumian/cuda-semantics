@@ -18,6 +18,9 @@ pwsh -File scripts/run.ps1
   （`activemask_good.cu`）：发散分支内 Discovery Pattern（快照 → `__syncwarp(快照)` → 稳定集合 →
   集合内 shuffle）与全员收敛对照，产物 `tmp/outputs/EXP-0001/2026-10-11/activemask-good/`，
   对应研究稿「观察 4」。
+- compute-sanitizer 复跑（Windhawk 停服后解锁）：`racecheck race-unsync` → RAW hazard ×128
+  （d01_simt.cu:76/77，反例 C 被工具证实）；`race-sync` → 0 hazards。
+  产物 `tmp/outputs/sanitizer-2026-10-11/d01-racecheck-*.txt`。
 
 产物写入 `tmp/outputs/EXP-0001/`（本机，未入库）。`activemask_good` 产物在
 `tmp/outputs/EXP-0001/2026-10-11/activemask-good/`。

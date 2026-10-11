@@ -337,6 +337,11 @@ $L:  ld.acquire.gpu.b32 %r7, [%rd3];     // flag：acquire 获取
 
 ### 观察 4：`compute-sanitizer` 当前**无法注入**（环境问题，待修）
 
+> **2026-10-11 更新：已解决**。根因是 **Windhawk**（进程级 mod 注入平台，每个新进程被注入
+> `windhawk.dll`）与 sanitizer 自身的 DLL 注入在 ntdll 撞车——停 Windhawk 服务后全部正常。
+> 当时记录的"非管理员、注册表、驱动版本"等排查方向均为误判。详见过程记忆
+> `tmp/docs/memory/windows-toolchain-pitfalls.md`。
+
 本机实测：即便对一个 trivial kernel（`cudaMalloc` + 单指令 kernel），`compute-sanitizer --tool memcheck` 也失败：
 
 ```
@@ -373,7 +378,12 @@ CUDA C++ Standard Library（libcu++）：
 
 ## 未决
 
-- **`compute-sanitizer` 注入失败**（本机级，见观察 4）：需在真正的高权限 / 干净终端复现，或核对驱动 596.49 与 sanitizer 2025.1.0 的兼容；修复前 racecheck/synccheck 不可用。这是本项目域 4/6/11 的共同前置。
+- **（已解决，2026-10-11）`compute-sanitizer` 注入失败**（根因 Windhawk 注入冲突；见观察 4 上方更新与
+  `tmp/docs/memory/windows-toolchain-pitfalls.md`）。停 Windhawk 后已补跑 `racecheck`
+  volatile-nonatomic / atomic：**双方 0 hazards**——这本身是一个重要校准：**racecheck 只检测 shared memory
+  hazard**，反例 ①④ 的丢更新/消息顺序是 **global memory** 上的竞争，racecheck 本来就看不见。
+  global 侧竞争的证据仍以运行数字 + PTX/SASS 为准（本篇反例 ①②④ 不变）。
+  产物 `tmp/outputs/sanitizer-2026-10-11/d04-racecheck-*.txt`。
 - **（部分完成，2026-10-11）order × scope 矩阵**：device/system 两档全矩阵已实测（观察 3.5，
   实验 `scripts/order_matrix.cu`）。剩余：block/cluster scope、cross-order 的 RMW 语义细节
   （`fetch_or`/`CAS` 与 `fetch_add` 在 order 上的落点是否一致）。

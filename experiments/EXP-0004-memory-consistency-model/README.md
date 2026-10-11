@@ -14,6 +14,9 @@ pwsh -File scripts/run.ps1
 
 - `pwsh -File scripts/run_order_matrix.ps1` —— memory order × thread scope 矩阵（`order_matrix.cu`），
   每种 (order, scope) 的 SASS 落点，产物 `tmp/outputs/D04/2026-10-11/order-matrix/`，对应研究稿「观察 3.5」。
+- compute-sanitizer 复跑（Windhawk 停服后解锁）：`racecheck volatile-nonatomic / atomic` 双方
+  **0 hazards**——校准点：racecheck 只查 shared memory hazard，.global 上的丢更新/消息竞争本来就不在其视野，
+  反例 ①④ 的证据仍以运行数字 + PTX/SASS 为准。产物 `tmp/outputs/sanitizer-2026-10-11/d04-racecheck-*.txt`。
 
 > `msg-*` 是跨 block 的生产者-消费者：消费者自旋有上界（`spin_max`），超时会计入
 > `timeouts` 而不是挂住。CUDA **不保证**两个 block 同时驻留，所以跨 block 自旋本身

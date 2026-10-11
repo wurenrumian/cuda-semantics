@@ -302,6 +302,39 @@ $L:  ld.acquire.gpu.b32 %r7, [%rd3];     // flag：acquire 获取
 
 `st.release.gpu` / `ld.acquire.gpu` 是 PTX 层最直接的"三轴合一"：语义 = release/acquire，作用域 = gpu，强度 = 强访问。`__threadfence()` 等价于 `fence.sc.gpu`（nvcc 目前落成 `membar.gl`）；`__threadfence_block()` = `membar.cta`；`__threadfence_system()` = `membar.sys`。
 
+### 观察 3.5：order × scope 矩阵在 SASS 上的落点（2026-10-11 补）
+
+`cuda::atomic<int, thread_scope_{device,system}>`（libcu++）下，"**写 data → 发布/获取 flag**"这一对动作的机器码
+（实验：`experiments/EXP-0004-memory-consistency-model/scripts/order_matrix.cu` + `run_order_matrix.ps1`，
+产物 `tmp/outputs/D04/2026-10-11/order-matrix/`，10 个组合全部编译运行通过）。生产者侧：
+
+| order（生产侧） | scope=device | scope=system |
+|---|---|---|
+| `relaxed` store | `ST.E.STRONG.GPU`（**无**栅栏） | `ST.E.STRONG.SYS`（**无**栅栏） |
+| `release` store | `MEMBAR.ALL.GPU` + `ERRBAR` → `ST.E.STRONG.GPU` | `MEMBAR.ALL.SYS` + `ERRBAR` → `ST.E.STRONG.SYS` |
+| `acq_rel`（RMW fetch_add） | `MEMBAR.ALL.GPU` + `ERRBAR` → `ATOM.E.ADD.S32.STRONG.GPU` | `MEMBAR.ALL.SYS` + 同构 |
+| `seq_cst` store | `MEMBAR.SC.GPU` + `ERRBAR` + `CCTL.IVALL` → `ST.E.STRONG.GPU` | `MEMBAR.SC.SYS` + 同构 |
+
+消费者侧（flag load）：
+
+| order（消费侧） | scope=device | scope=system |
+|---|---|---|
+| `relaxed` load | `LDG`（无附加） | 同构 |
+| `acquire` load | `CCTL.IVALL`（失效**自己**的 L1 后再读） | 同构 |
+| `seq_cst` load | `MEMBAR.SC.GPU` + `ERRBAR` + `CCTL.IVALL` | 同构 |
+
+四个要点（都能挂回正文白话表）：
+
+1. **"作用域写在指令里"在这里依然成立**：`GPU ≠ SYS` 落出的是同构指令换了后缀，机制完全对称。
+2. **relaxed 原子 = 强访问但无顺序**：`ST.E.STRONG` 单条、原子、但没有任何 `MEMBAR`——
+   正好印证反例 ② "默认原子只解决原子性"。顺带修正一个直觉：`relaxed` 的原子 store **不是**弱访问，
+   它落地成 STRONG 单条指令；"弱"的是普通 `STG.E`。
+3. **release/acq_rel 用 `MEMBAR.ALL.*`**（比 `__threadfence()` 的 `MEMBAR.SC.*` 更广：ALL 连自身读写也要保序）。
+4. **acquire 在消费侧的实现是 `CCTL.IVALL`（失效本线程 L1 后再读）**，而不是栅栏——
+   L1 不参与跨 block 一致性，本线程可能还缓存着旧内容；读 flag 前先失效自己的 L1，
+   和 fence 携带 `CCTL.IVALL`（观察 2 里的用法）是同一个道理。
+   每次 acquire 都要失效一遍自己的 L1，这就是 acquire 的实际代价（量化归域 12）。
+
 ### 观察 4：`compute-sanitizer` 当前**无法注入**（环境问题，待修）
 
 本机实测：即便对一个 trivial kernel（`cudaMalloc` + 单指令 kernel），`compute-sanitizer --tool memcheck` 也失败：
@@ -341,7 +374,9 @@ CUDA C++ Standard Library（libcu++）：
 ## 未决
 
 - **`compute-sanitizer` 注入失败**（本机级，见观察 4）：需在真正的高权限 / 干净终端复现，或核对驱动 596.49 与 sanitizer 2025.1.0 的兼容；修复前 racecheck/synccheck 不可用。这是本项目域 4/6/11 的共同前置。
-- **未在本机跑 `cuda::atomic_ref` 的完整 order 矩阵**（relaxed/acquire/release/acq_rel/seq_cst × block/device/system），只做了 inline-PTX `st.release.gpu` / `ld.acquire.gpu` 与 `__nv_atomic_*`。补这个矩阵能给出"每种 order 在 SASS 上的落点"。
+- **（部分完成，2026-10-11）order × scope 矩阵**：device/system 两档全矩阵已实测（观察 3.5，
+  实验 `scripts/order_matrix.cu`）。剩余：block/cluster scope、cross-order 的 RMW 语义细节
+  （`fetch_or`/`CAS` 与 `fetch_add` 在 order 上的落点是否一致）。
 - **system scope 只验到指令层**（`MEMBAR.SC.SYS` / `membar.sys`），未做真实的 device↔host 跨域发布实验（需 mapped pinned memory + host 端 spin 配合）。
 - **cumulativity / decoupled look-back（CUB 的 acquire-mask 搜索）**未动手：这是"多生产者 + 单消费者"下最能暴露 cumulativity 与 scope 关系的实战模式，留作下一步。
 - **未做 store-buffer 型 litmus**（两线程互写互读）在 `-O3` 下的编译器重排复现；本机 L2 一致 + 编译器保守，可能难复现，但值得用 PTX 反汇编确认是否存在重排空间。

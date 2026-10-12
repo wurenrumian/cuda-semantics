@@ -3,7 +3,7 @@ title: 域 10 — 宿主侧运行时 / 启动语义
 type: research
 status: draft
 created: 2026-10-08
-updated: 2026-10-11
+updated: 2026-10-12
 tags: [cuda, semantics, runtime, launch, streams, error-handling, dynamic-parallelism, sm_89]
 related:
   - docs/plan/cuda-semantics-topic-map.md
@@ -23,11 +23,37 @@ related:
 它把工作塞进某个 stream 的队列就立刻返回，宿主侧只同步保证「这条启动描述本身合法」；
 kernel 能否正确执行、何时执行、和谁并发，都要到之后某个**同步点**才以错误码或时间线的方式显形。
 
+## 一次 launch 的一生：提交与观察点
+
+把 `<<<>>>` 想成**寄包裹**（提交）而不是**跑腿**（执行），每一步产出的东西不同：
+
+```
+ host ─ 配置校验 ─ 参数打包 ─ 入队(stream) ─ 返回
+                    │                            │(①同步观察点: <<<>>> 立刻可见)
+                    ▼
+ stream 队列 ─ 等(前序任务/资源) ─▶ SM 开跑 ─▶ 全部结束
+                     (异步错误在这里产生)          │(②异步观察点: sync/查询处浮现)
+```
+
+| 步骤 | 发生什么 | 边界 |
+|---|---|---|
+| **配置校验** | grid/block 尺寸、shared 超额、参数不合法当场回错（观察 1：`invalid configuration argument`） | 只验"配置表"，不预演 kernel 内容 |
+| **参数传递** | 参数打进常量 bank（SASS 里 `MOV c[0x0][0x160]` 的来源） | 指针按**值**拷——host 缓冲的后续改动与 device 已拿到的那份无关 |
+| **异步提交** | 工作挂进指定 stream 尾部，**立即返回** | ① 只能报错误码 0/失败，不能证明 kernel 跑对 |
+| **执行** | 依赖调度/资源；错误（非法访存等）在执行中产生 | 与 host 完全脱钩；互不约束 |
+| **完成/观察** | 同步点（`cudaDeviceSynchronize`/stream sync/查询/get）读到 ④ | ② 只有守规矩的调用会**浮出**错误；错误**粘性**（反例 3） |
+
 ## 承诺与边界
 
 ### 1. 启动配置 `<<<grid, block, smem, stream>>>`
 
 - **承诺**：配置在**提交时同步校验**。非法配置当场返回错误，kernel 根本不会执行。
+- 四个实参各管一件实事（直觉例子配 256 线程/1 SM 记忆点）：
+  - `grid`（几支队伍）、`block`（每队几人）：总线程 = `grid.x*y*z × block.x*y*z`——写大算例时
+    先在心里乘一遍（如可导 256×256 tile 要 `grid(32,32)`、`block(8,8)`）。
+  - `smem`：动态 shared 字节数——写比 `cudaFuncSetAttribute` 设的上限还大的数，提交当场回错。
+  - `stream`：挂进哪条队列——**决定它与谁有先后关系**（下一节），传 0/省略 = 默认 stream
+    （legacy 隐式同步，见反例 2）。
 - **边界（本机 `cudaDeviceProp`，见 `props.txt`）**：
 
   | 项 | 本机值 | 语义边界 |
@@ -56,6 +82,19 @@ kernel 能否正确执行、何时执行、和谁并发，都要到之后某个*
 - `cudaGetLastError()`：返回并**清除** last-error 槽位；
   `cudaPeekAtLastError()`：返回但**不清除**。两者都只反映"上下文已记录"的错误，
   **不主动探测**设备；"launch 后 `cudaSuccess`"只说明 launch 合法，不说明 kernel 跑对了。
+- 观察点 G 各看什么/清什么（配合生命周期图的 ①②）：
+
+| 调用 | 阻塞 host？ | 能看到什么错误 | 会清除 last-error？ |
+|---|---|---|---|
+| `cudaGetLastError()` | 否 | 槽里已记录的错误（同步或已浮现的异步） | **是** |
+| `cudaPeekAtLastError()` | 否 | 同上 | 否 |
+| `cudaStreamQuery(s)` | 否 | s 上已浮现的异步错误 | — |
+| `cudaStreamSynchronize(s)` | **是**（至 s 已提交工作完成） | 覆盖面 = stream s | — |
+| `cudaEventSynchronize(e)` | **是**（至 event 完成） | 覆盖面 = event 之前的工作 | — |
+| `cudaDeviceSynchronize()` | **是**（所有 stream 全部先前工作） | 全设备 | — |
+
+- "谁先看到"没有先后承诺：错误**在上下文记下的那一刻**就位；不同观察点只是不同的"读法"，
+  顺带的是否阻塞、覆盖面不同（依赖型调用还兼做依赖边——event 那一行见 09 的依赖图）。
 - **边界**：清掉 last-error 槽位 ≠ 修复上下文。本机实测：非法访存后
   `cudaGetLastError()` 取到 700，再 `cudaDeviceSynchronize()` **仍**返回 700 —— 上下文已废。
 
@@ -75,6 +114,10 @@ kernel 能否正确执行、何时执行、和谁并发，都要到之后某个*
 - runtime 为每个 device 维护一个 **primary context**；`cudaSetDevice` 切换当前 device。
 - runtime 侧**没有公开的 module/function handle**（`CUmodule` / `CUfunction` 是 Driver API）；
   每个 device 的 default stream 各自独立，跨 device 命令之间无隐式顺序。
+- **指针是"带着设备号的东西"**：同一地址值在 device A 有效不代表在 B 有效；跨 device 传指针
+  需 UVA（本机 unifiedAddressing=1）支持，且**可见性/访问路径**要与 peer access 设置对上
+  （未配 peer 就跨 device 解引用,属提交级/执行级错误两可,看驱动怎么拒）。多 GPU 的顺序/可见性
+  靠疯狂显式（event/`cudaDeviceEnablePeerAccess`/`cudaStreamWaitEvent`），别拿单卡直觉平移。
 - 本机单卡（RTX 4060 Laptop），多 GPU / peer access 只在概念层涉及。
 
 ## 反例
@@ -87,6 +130,23 @@ kernel 能否正确执行、何时执行、和谁并发，都要到之后某个*
 立刻 `cudaGetLastError()` 得到 **`no error (0)`**，直到 `cudaDeviceSynchronize()` 才报出
 **`an illegal memory access was encountered (700)`**（`async.txt`）。
 → 只在 launch 后查一次错，等于没查执行错误。
+
+**最小正确检查模板**（两处各司其职，都别省）：
+
+```cpp
+kernel<<<grid, block, smem, stream>>>(args...);
+
+// ①launch 后即刻查一次：抓"提交级"错误（配置/参数/资源）
+cudaError_t e = cudaGetLastError();          // 清槽后立即处理,别让上一错误串到本次
+if (e != cudaSuccess) { /* 读 cudaErrorString(e)、规约退出路径,不要吞 */ }
+
+// ②最终同步处再查一次：抓"执行级"错误（非法访存/断言/中止）
+cudaError_t s = (sync_mode ? cudaDeviceSynchronize() : cudaStreamSynchronize(stream));
+if (s != cudaSuccess) { /* 700 级错误上下文已废:走"重建或退出"分支,不可能原地恢复 */ }
+```
+
+两个分支上报错**不是同一类问题**：①修参数/修配置就好；②一经出现、上下文报废（反例 3），
+模板里的②必须是"处理并放弃上下文"的路径，写成"清理错误继续跑"就是自欺。
 
 ### 反例 2：以为「kernel 之间天然串行」，或以为「开了两个 stream 就并行」
 
@@ -204,13 +264,20 @@ Function : _Z9spin_waitPViPix
 dp_run: parent sync: no error / child wrote 42 (expect 42)
 ```
 
-**10. compute-sanitizer 本机无法 attach** — `memcheck-async.txt`（连 NVIDIA 自带的
-`sanitizer_smoke.exe` 也报同一错）：
+**10. compute-sanitizer（2026-10-12 更新：本域拿到最贴合的判词）** — 解锁（停 Windhawk）后：
+`memcheck runtime_demo.exe async` 直接把 700 级错误**指到代码行**：
 
 ```text
-========= Error: process didn't terminate successfully
-========= Error: Target application terminated before first instrumented API call
+========= Invalid __global__ write of size 4 bytes
+=========     at deref_null(int *)+0x50 in runtime_demo.cu:20
+=========     by thread (0,0,0) in block (0,0,0)
+=========     Address 0x0 is out of bounds
 ```
+
+这正是"非法访存=无效写"的**工具级定位**：行为数据只给错误码 700，memcheck 给出**地址 0x0、
+行 20、线程归属**。错误异步性/粘性的结论（反例 1/3）不因此改变——memcheck 只是让"错误发生"的
+主张从 API 错误码升格成了指令位置。
+（解锁前的失败记录：连自带 `sanitizer_smoke.exe` 都报同一注入错；根因 Windhawk，见域 0。）
 
 ## 出处
 
@@ -240,12 +307,13 @@ dp_run: parent sync: no error / child wrote 42 (expect 42)
 
 ## 未决
 
-- **compute-sanitizer 在本机不可用**：`E:\NVIDIA\CUDA\v12.8\compute-sanitizer\` 下的
-  `sanitizer_smoke.exe` 自己都注入失败（"Target application terminated before first
-  instrumented API call"）。需要排查（驱动 596.49 / 注入路径 / 安全软件）。恢复后本域的
-  非法访存可拿到更强的定位，但仍不改变"异步错误只在同步点出现"的结论。
+- **（已解决，2026-10-12）compute-sanitizer**：Windhawk 注入冲突解除（见域 0）；本域已拿到
+  `deref_null` 的 memcheck 指令级判词（观察 10）。**遗留**：`memcheck` 报过的程序在 sanitizer
+  下的粘性表现（如错误后 kernel 继续跑/提前止步）未单独记录——反例 3 的粘性结论来自
+  无插桩运行，两者不冲突但未交叉验证。
 - **并发度只做了逻辑证明，没测真重叠**：本域用自旋标志位证明了 default stream 的隐式串行，
-  但没测"两个 non-blocking stream 是否真在同一时刻占用 SM"。要定量需 `nsys` 时间线。
+  但没测"两个 non-blocking stream 是否真在同一时刻占用 SM"。要定量需 `nsys` 时间线
+  （`ncu` 需计数器权限 `ERR_NVGPUCTRPERM`，与 Windhawk 无关，见域 0）。
 - **CUDA 12 runtime 模块级 API**（`cudaLibrary` / `cudaKernel` / `cudaLibraryLoadData`）
   未实测；本域只确认 runtime 不再暴露旧的 `CUmodule` 风格句柄。
 - **device-side graph launch / programmatic dependent launch (PDL)** 属于域 9 / 域 12 交界，

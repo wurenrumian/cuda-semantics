@@ -3,7 +3,7 @@ title: 域 12 — 架构 / 微架构相关的语义
 type: research
 status: draft
 created: 2026-10-08
-updated: 2026-10-11
+updated: 2026-10-12
 tags: [cuda, semantics, architecture, microarchitecture, sm_89, ada, sass, occupancy, shared-memory, coalescing, sector]
 related:
   - docs/plan/cuda-semantics-topic-map.md
@@ -25,6 +25,19 @@ related:
 ## 一句话
 
 CUDA 的语义分两层：一层是 **ISA（PTX / CUDA C++ 抽象机）承诺的**，跨架构不变；另一层由**具体架构实现决定**，换一块 GPU 就可能改。本域的坑几乎都来自"把后一层当承诺用"：warp 大小（32）是 ISA 常量，而 SM 数量、每 SM 的资源上限、block 落到哪个 SM、SASS 指令序列、访存代价、原子吞吐，全都只是**可查询 / 可观测的架构事实**。
+
+## 四层分家：每层给自己的"字据"不同
+
+| 层 | 内容 | 来源 | 怎么验证 | 能不能当依据写进推理 |
+|---|---|---|---|---|
+| ① ISA / 编程模型保证 | warp=32、内存模型、原子性、同步语义 | 规范（域 01–11 各篇已引） | 规范原文 + 各域实测 | **可以**（跨架构） |
+| ② 可查询的架构属性 | SM 数、每 SM 上限、L2、`concurrentKernels` | `cudaDeviceProp` / `cudaFuncAttributes` | 运行时查询 | 可以**描述当前设备**，不能写成"永远如此" |
+| ③ 微架构实现细节 | SASS 指令形态、指令选择、发射方式 | -cubin + cuobjdump（本机 D07/这里） | 同源码多 arch 对照 | 只能说"这份编译产物这样"，**不当语义条约** |
+| ④ 性能测量 | 时延、吞吐、占用率曲线 | 计时/计数器（本域的 coalesce 探针） | 可复现口径 + 多次重复 | 只结论"**本机当前状态**"，换设备重测 |
+
+用例的关系：③ 只在"证实 ② 的解释"或"证伪直觉"时有用（反例一）；④ 的数字离开 ②③ 的
+口径（访问模式/工作集/缓存状态）没有意义（反例三的口径提醒）。**查得到 ≠ 可依赖**：
+正确性永远回 ①。
 
 ## 承诺与边界
 
@@ -52,6 +65,25 @@ CUDA 的语义分两层：一层是 **ISA（PTX / CUDA C++ 抽象机）承诺的
 | `reservedSharedMemPerBlock` | 1024 | 架构事实 |
 | `l2CacheSize` | 33554432（32 MiB） | 架构事实 |
 
+### 三道门：从 compute capability 到"这个特性我能用吗"
+
+把"能不能用某特性"的疑问拆成**串行的三道门**，每道门验收手段不同——跳过一扇就错答：
+
+| 门 | 问题 | 验收手段 | 例子 |
+|---|---|---|---|
+| ① **编译能过吗** | 目标 `-arch` 的工具链**接受**这个写法吗 | `nvcc -arch=sm_XX` 试编（backend ptxas 门控报错） | `cp.async` 在 sm_89 报错？反了——sm_89 过、sm_75 报（观察 C） |
+| ② **这块设备支持吗** | 运行时机器**有**这个能力吗 | `cudaDeviceProp`（major/minor、各 attr）或 `cudaDeviceGetAttribute` | TMA：sm_90 门控 → 本机 sm_89 **两道门都过不去** |
+| ③ **运行期真用得动吗** | opt-in / context / 权限齐了吗 | `cudaFuncSetAttribute` 返回码、运行期实测 | 99KB 动态 shared：过了①②还需 opt-in（观察 B），缺它 `invalid argument` |
+
+三道门各自失败的信息也不同：① ptxas 报错（编译期）；② 查询属性回 0 或假；③ API 返回
+`invalid argument`/运行时错。常见的错答是拿 ① 的"编译过了"当 ② 的"一定支持"（fatbin 里
+塞了 PTX 时尤其迷惑——见下 JIT 小节），或拿 ② 的"属性查到"当 ③ 的"不用 opt-in 就能用"。
+
+**门控 vs JIT fallback（别混为一对邻居）**：-arch/-gencode/-gpu-code 决定 fatbin 里装什么
+（SASS for sm_XX + PTX for compute_XX 各选）；新架构跑旧 fatbin 时走 **PTX JIT**。JIT 的
+语义仍靠 PTX 层兑现，但**性能/指令选择是 JIT 现场定的**（分类里的 ③层换个生成者）——
+"PTX 兜底能跑"不等于"性能按源 SASS 预期"。域 07 的四层链路图给这层关系做底图。
+
 **边界清单（想当然就会错的）：**
 
 - **`maxThreadsPerMultiProcessor` 不是 2048**：Ada（8.9）是 1536，occupancy 上限天然低于 Ampere 的 2048。
@@ -78,6 +110,11 @@ sm_89 :  （与 sm_80 相同）
 
 `__ldg` 的 `sass_probe` 还暴露了常量物化的差异：sm_80 用 `HFMA2.MMA R7,-RZ,RZ,0,2.38e-07` 造出 4，sm_89 直接 `MOV R7, 0x4`；sm_75 则是 `MOV R1, c[0x0][0x28]`，sm_80/89 用 `IMAD.MOV.U32`。**结论：把具体 SASS 序列当作跨架构不变量是错的；保证只在 PTX / CUDA C++ 那一层。**
 
+> **对照口径**（这类跨架构比较怎么才算数）：三份 SASS 出自**同一源码、同一编译开关**
+> （`-O3 -cubin`，只换 `-arch`），对照按"指令类别对齐"摘录而非逐行——否则 diff 里全是
+> 伪差异。"解释了差异"与"升级成语义要求"是两步：**本表只做前者**。任何"某代必须有
+> XXX 指令"的写法都是把 ③ 层观察写成 ① 层承诺，按四层分家表是错级的。
+
 ### 反例二："硬件有 100 KB shared，我放 104 KB 静态数组就行"——编译期直接被拒
 
 "`sharedMemPerMultiprocessor = 102400`，那我 `__shared__ float big[26000]`（104000 B）当然可以" —— ptxas 直接编译失败（`build-static_over.log`）：
@@ -87,6 +124,25 @@ ptxas error : Entry function '_Z15too_much_staticv' uses too much shared data (0
 ```
 
 `0x19640 = 104000`，`0xc000 = 49152 = 48 KB`。**"能不能放"是分层的：静态 48 KB（编译期）< opt-in 动态 101376（运行期）≤ 硬件 100 KB/SM。** 把硬件容量当成"一块 block 能用多少 shared"就会错。
+
+同一组数字，从 occupancy 视角再读一遍（每级限制**各管一摊**， 取的是最小）：
+
+```
+硬件/SM 上限        102400  ← 池子容量的家用上限
+   ▲
+block 可请求上限    101376  ← opt-in 后允许"一块 block"要这么多
+   ▲
+静态编译上限         49152  ← 静态 __shared__ 直接锚定这一层
+```
+
+- **静态/动态在同一池子**：两者都从"每 SM 的 shared 池"里扣（02 域 dyn_smem 实验：静态
+  16KB 与动态 16KB 都给 5 block/SM，同池实锤）。
+- **opt-in 只是"允许"**：`cudaFuncSetAttribute(MaxDynamicSharedMemorySize)` 解除的是
+  "单 block 请求量"的门（49152→101376），**不改变**池子总量——SM 同一时刻塞几个 block
+  由此还要除以（动态量 × block数 ≤ 池子；`__launch_bounds__` 的 minBlocks 是**下界不封顶**，
+  见 02 域"launch_bounds 实验"）。
+- **`reservedSharedMemPerBlock` = 1024 B**：每块还得留 1KB 系统 reserved——报告"可用"时它也
+  算在你的申请单里（本机 arch_probe.out 的观察值之一）。
 
 ### 反例三（性能语义，非正确性）：以为"读的元素数一样 ⇒ 代价一样"
 
@@ -100,6 +156,13 @@ strided  : 0.1790 / 0.1790 ms/iter        ≈ 10–13×
 原因在 32B sector 粒度：连续 warp 触碰 4×32B，跨步 warp 每个 lane 各自一个 sector。**这条只能当"性能语义"用**——由架构 / 访存层级决定、随架构变；把它当成"跨步一定慢 10 倍"写进正确性推理，就是另一类错。
 
 （**口径提醒**：两种模式读的元素数一样，但**工作集不一样**——连续只碰前 4 MB（能常驻 32 MB 的 L2），跨步要碰满 128 MB（基本走显存）。所以这个 10–13× 里还混着"L2 命中 vs 走 DRAM"的成分，不是纯粹的 sector 计数对比；要分离二者得看 `ncu` 的 sector 计数器，而本机拿不到。）
+
+> **这条性能实验的完整口径**（引用数字前先核对五要素，按四层分家的 ④ 层要求）：
+> **访问模式** = 连续/跨步（`coalesce_probe.cu` 内定）；**缓存状态** = L2 常驻与否已混入数字
+> （下面的工作集差异）；**工作集** = 128 MB（跨步）/ 有效约 4 MB（连续，见口径提醒）；
+> **计时方法** = 墙钟 ms/iter（无计数器）；**重复次数/取值方式** = 以 `scripts/run.ps1`
+> 与源码为准。缺任何一项，这数字就**不能**被引用去支撑别的结论——尤其别外推到其他 GPU
+> 或其他访存/工作集组合。
 
 （还有一条同属"环境 / 权限语义"的坑：`ncu` 读合并访存计数器在本机被拒，见下。）
 

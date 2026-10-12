@@ -58,7 +58,9 @@ done（2026-10-08 首轮）
 
 ## 未决
 
-- compute-sanitizer 本机无法 attach（连自带 `sanitizer_smoke.exe` 都失败），见讲解稿「未决」。
+- **（已解决，2026-10-12）memcheck 证据已补**：Windhawk 注入冲突解除后，
+  `memcheck async` 把 `deref_null` 定位到 `Address 0x0` + `runtime_demo.cu:20`
+  （产物 `tmp/outputs/sanitizer-2026-10-12/d10-*`）。`nsys` 定量仍缺。
 - 未用 `nsys` 定量验证 non-blocking stream 的真并发。
 
 ## 运行记录
@@ -66,3 +68,4 @@ done（2026-10-08 首轮）
 | 时间 | 命令 | 产物 |
 |---|---|---|
 | 2026-10-08 | `run.ps1`（build → config/peekget/async/streams/props → memcheck → smem/dp/ptx） | `../../tmp/outputs/D10/2026-10-08/` |
+| 2026-10-12 | memcheck `async`（Invalid __global__ write → 精确定位） | `tmp/outputs/sanitizer-2026-10-12/d10-memcheck-async.txt` |

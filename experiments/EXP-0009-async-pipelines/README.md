@@ -61,8 +61,9 @@ compute-sanitizer。
 
 ## 未决
 
-- **compute-sanitizer 本机失效**：任何 CUDA 程序都注入失败
-  （`Target application terminated before first instrumented API call`），故无 racecheck 证据。
+- **（已解决，2026-10-12）racecheck 证据已补**：Windhawk 注入冲突解除后，
+  `cpasync-racy` 报 5 组 hazard（写方为 `cp_async` 的 async-proxy 访问），`cpasync` 正确版 0
+  hazard；产物 `tmp/outputs/sanitizer-2026-10-12/d09-*`。`ncu` 计数器权限仍待管理员。
 - 未跑 `ncu` / `nsys`；未做多 stage double buffering；未测统一内存；未做「铺满 GPU 不重叠」对照。
 
 ## 运行记录
@@ -70,3 +71,4 @@ compute-sanitizer。
 | 时间 | 命令 | 产物 |
 |---|---|---|
 | 2026-10-08 | `scripts/run.ps1`（build → 各模式 → SASS → TMA 探针 → sanitizer） | `../../tmp/outputs/D09/2026-10-08/` |
+| 2026-10-12 | racecheck `cpasync` / `cpasync-racy`（0 vs 5 hazards） | `tmp/outputs/sanitizer-2026-10-12/d09-*.txt` |

@@ -100,7 +100,7 @@ PTX 的访存指令把"访存"拆成三个**正交**旋钮——**序（order）
 
 两个反直觉点：
 - **默认 `ld.global` 与显式 `ld.global.ca` 的 SASS 不同**（`LDG.E` vs `LDG.E.STRONG.SM`），尽管 `.ca` 文档上就是默认缓存策略。说明 SASS 后缀编码的**不止缓存策略**。
-- **`ld.global.lu` 在全局地址上按文档应表现为 streaming（≈ `.cs`）**，但 SASS 给的是 `LDG.E.LU`（而 `.cs` 给 `LDG.E.EF`）。PTX ISA 的原话是："The `ld.lu` instruction performs a load cached streaming operation (`ld.cs`) on global addresses."（§9.7.9.1）——即**文档说二者等价，SASS 却给不同后缀**。这说明 SASS 后缀并不是 PTX 语义的 1:1 翻译（见「未决」4）。
+- **`ld.global.lu` 在全局地址上按文档应表现为 streaming（≈ `.cs`）**，但 SASS 给的是 `LDG.E.LU`（而 `.cs` 给 `LDG.E.EF`）。PTX ISA 的原话是："The `ld.lu` instruction performs a load cached streaming operation (`ld.cs`) on global addresses."（§9.7.9.1）——即**文档说二者等价，SASS 却给不同后缀**。这说明 SASS 后缀并不是 PTX 语义的 1:1 翻译（见「未决台账」域 07 · 4）。
 
 ### 3. 边界（哪些不能依赖）
 
@@ -215,7 +215,7 @@ ld.acquire.gpu  ->  LDG.E.STRONG.GPU  (02_strong_vs_weak.sass, _Z10strongld_kPKi
    （反例 4 的 dead_load）；存在但谓词恒假/不可达 ⇒ 死路径。两种"消失"原因不同——
    一个是编译器许可，一个是运行时事实，引用时别混。
 5. **核不出语义就声明未定**：同助记符不同语义时（`STRONG.SYS` 双义、`.LU/.EF` 差异），
-   用 `nvdisasm -c` 看控制位；推不下去就写进「未决」，不要现场编语义。
+   用 `nvdisasm -c` 看控制位；推不下去就写进「未决台账」（`open-questions.md`），不要现场编语义。
 
 ### 环境与命令
 
@@ -295,20 +295,3 @@ cuobjdump -sass x.cubin > x.sass
 操作数类型另见 PTX ISA §6 Instruction Operands。
 
 **目标架构**：`sm_89` 相关约束见 CUDA C++ Programming Guide §6 CUDA-Enabled GPUs 与 §16 Compute Capabilities。
-
-## 未决
-
-1. **SASS `STRONG.SM/GPU/SYS` 的精确语义未官方确认**。SASS 无公开 ISA 手册。目前只能推断它同时编码
-   "缓存解析层级"（SM/L1、GPU/L2、SYS/DRAM）与某种序属性；`.ca→STRONG.SM`、`.cg→STRONG.GPU`、
-   `.cv→STRONG.SYS` 与"解析层级"高度吻合，但**待用 `nvdisasm` 控制位或更多样本证实**。
-2. **反例 1 无运行时工具判定（环境限制，如实标注）**：全局内存上的"丢失第二批 load"不属
-   racecheck 视野（racecheck 只查 shared memory hazard，04/05 已实测校准）；memcheck 也不管
-   "语义读旧值"。2026-10-11 起 compute-sanitizer 本机已可用（根因 Windhawk 注入冲突，见 00 篇），
-   但对本反例仍无对应工具——结论**只能**靠 SASS/PTX 人工判读，不能用"跑不出错"补位。
-3. **cache operator 的实际缓存行为未用 `ncu` 验证**：`.cg` 是否真的绕过 L1、`.cs` 的 evict-first 命中率，
-   需 L1/TEX 指标佐证（本轮只看了指令编码）。
-4. **`ld.global.lu` 在 SASS 为 `LDG.E.LU`**，与 PTX 文档"全局地址上等价于 `.cs`"的说法表面不符——
-   待确认是文档措辞、目标架构差异，还是 ptxas 保留 `.LU` 语义。
-5. 与相邻域的边界：本文只到"**指令提供了哪些旋钮**"；**序的推理（happens-before、scope、fence 组合）**
-   归域 04/05，**编译器重排与 UB** 的更多形态归域 11。本文的 `volatile`/`seq_cst` 观察与它们有意交叉，未去重。
-6. 未展开：`.mmio`、`ld.relaxed`、`.el/.evict_*` 优先级提示、`cp.async` 路径（归域 09）。

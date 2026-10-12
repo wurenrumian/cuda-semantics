@@ -298,17 +298,3 @@ E:\NVIDIA\CUDA\v12.8\compute-sanitizer\compute-sanitizer.exe --tool memcheck  th
 - **§9.7.13.1 `bar` / `barrier`** —— CTA 内屏障 `bar.sync a{, b}`：不给 `b` 就是全 CTA 参与（`__syncthreads()` 的落地）；给 `b` 时**必须是 warp 大小的整数倍**，所以只能按 warp 粒度圈定参与者。
 
 **本机实测**：`tmp/outputs/D02/2026-10-08/`（`build.log` / `sched.txt` / `occupancy.txt` / `barrier.txt` / `sass.txt` / `sanitizer-blocked.txt`）。
-
-## 未决
-
-- **（已处理）旧的 `barrier` 死锁 demo 会挂住**：无界 `while (true) __nanosleep(1000)` 已移除，`barrier` 改成两个有界演示，`run.ps1` 也加了逐进程看门狗（见「观察 4」）。遗留问题：想用 `compute-sanitizer --tool synccheck` 直接抓"发散 `__syncthreads()`"，仍需要在 sanitizer 可用的环境里另写一个可被 sanitizer 收尾的 kernel。
-- **（已解决，2026-10-11）compute-sanitizer 未能取数**：根因是 **Windhawk 进程注入冲突**（非权限/注册表——
-  详见过程记忆 `tmp/docs/memory/windows-toolchain-pitfalls.md`）。停 Windhawk 服务后已补跑：
-  `synccheck barrier` + `memcheck sched` 均 **0 errors**，产物 `tmp/outputs/sanitizer-2026-10-11/d02-*.txt`。
-  （注：本篇剩下的"发散 `__syncthreads()`"死锁 kernel 已从可跑模式移除，synccheck 只复核了现用作演示的
-  有界 barrier 写法。）此坑的风险策略：Windhawk 重启自启，跑 sanitizer 前需再停；域 4/6/11 的公共前置已解除。
-- **`%smid` 虚拟化语义**：`SR_VIRTUALSMID` 是否跨 launch 稳定、与 `%nsmid`/物理 SM 的关系，未做实验。
-- **计算抢占**（Volta+ computer preemption）：block 被抢占后是否迁移、语义影响，未验证。
-- **多维 grid → warp 映射**：文档说 `threadIdx.x` 最快线性化，但"线性序 → warp/sub-partition"的具体映射未在本机观测（与域 12 交叉）。
-- **`ncu` 实测占用率**（scheduler/occupancy section）未跑；本稿用的是运行时 API `cudaOccupancyMaxActiveBlocksPerMultiprocessor`。
-- **cooperative groups `grid.sync()`**（唯一被承诺的跨 block 同步）留域 6；sm_90 的 cluster/DSMEM 本机不支持，仅概念覆盖。

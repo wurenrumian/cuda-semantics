@@ -273,19 +273,3 @@ shared memory hazard，04/05 已校准），它的证据仍是数值丢失 + `ld
 - **§8 Memory Consistency Model**：定义 volatile/`mmio` 操作类型、scope（`.cta/.gpu/.sys`）、requires-byte-address、morally strong 操作等；volatile 与普通访存的差别在此。
 - **§9.7.8 Data Movement Instructions**：`ld` / `st` 的 cache operator（`.ca/.cg/.cs/.lu/.cv/.wt`）、`.volatile`、`.relaxed/.acquire/.release` 修饰；本机 `volatile` 落成 `ld.volatile.global` / `st.volatile.global`。
   `docs.nvidia.com/cuda/parallel-thread-execution/`
-
-## 未决
-
-- **（已解决，2026-10-12）compute-sanitizer（域 04/06/11 的公共阻塞）**：根因 Windhawk
-  注入冲突，停服即恢复。本域已拿到 racecheck（counter-shared 16 errors）与 initcheck
-  （uninit 4 errors）判决。**遗留校准**：racecheck 对 global 竞争（counter-volatile 形状）
-  不适用——仍以数值 + PTX/SASS + 语义定义叠加论证。
-- 未覆盖的 UB 点（本机可直接做，尚未做）：
-  - 越界访存：03 域已拿到 `memcheck` 的 `Invalid __local__ read` 判词（同族证据，
-    `tmp/outputs/sanitizer-2026-10-11/d03-*`）；本域的 global 越界读未单独跑。
-  - 未初始化读：`read_uninit` 结果稳定为 `0 0 0 0`（本机 `cudaMalloc` 常给零页），**不能**
-    据此认为"未初始化=0"；这一点已被 initcheck 判词补证（观察 D）。
-  - 有符号整数溢出 / 移位 UB、`reinterpret_cast` 触发的严格别名、`memcpy` 之外的 type punning。
-  - 编译器对"无副作用死循环"的处理（`while(1);` 是否被保留）。
-- `-restrict` 全局开关对所有 kernel 指针的影响未测；`-use_fast_math` 与 UB 的交互留给域 08。
-- `__restrict__` 触发 `ld.global.nc` 是本机（sm_89/CUDA 12.8）的代码生成选择；不同 ptxas 版本可能不同，语义结论（可重排）不变。

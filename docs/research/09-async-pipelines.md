@@ -147,7 +147,7 @@ event 的 record/wait 用依赖图读最稳——**它建立的是"s2 的后续�
 |---|---|
 | 内存类型 | pinned → 真异步;pageable → 主机侧同步（反例 A：33 ms vs 0.013 ms） |
 | 方向 | H2D 与 D2H 都受上条约束;D2H 还会为"最终到达 host"做同步尾 |
-| 运行时/驱动 | WDDM 批处理可能延迟提交（Windows 特有,见未决） |
+| 运行时/驱动 | WDDM 批处理可能延迟提交（Windows 特有，见「未决台账」域 09 · 5） |
 | 资源 | copy engine 数（`asyncEngineCount`）为 1 时 H2D/D2H 与计算的重叠有限 |
 
 ### 6. `cp.async`：把「搬运」异步化（sm_80+，本机支持）
@@ -325,19 +325,3 @@ E:\NVIDIA\CUDA\v12.8\compute-sanitizer\compute-sanitizer.exe --tool racecheck as
   - §9.7.9.25.3.1 `cp.async`；§9.7.9.25.3.2 `cp.async.commit_group`；
     §9.7.9.25.3.3 `cp.async.wait_group` / `cp.async.wait_all`。
   - §9.7.9.25.4.1 `cp.async.bulk`（sm_90）；§9.7.9.25.5.2 `cp.async.bulk.tensor`（sm_90）。
-
-## 未决
-
-- **（已解决，2026-10-12）racecheck 对反例 C 的独立判定**：Windhawk 注入冲突解除后已补跑
-  （见「关键观察」），racy 版 5 组 hazard、正确版 0。**遗留校准**：racecheck 能看见
-  async-proxy 的写是本次实测事实（`cp_async` 出现在写入方堆栈里），但"它对每类异步机制都
-  有效"不应推广——工具对 proxy 的覆盖随版本/机制可能变化，未见例外情形时仍以 SASS `DEPBAR`
-  + 行为数据兜底。
-- **`ncu` / `nsys` 未跑**：重叠率、copy engine 利用率、SM 占用等只用了墙钟时间；时间线证据
-  待补（`ncu` 需计数器权限 `ERR_NVGPUCTRPERM`，与 Windhawk 无关）。
-- **统一内存未实测**：`cudaMallocManaged` / prefetch / 迁移语义待做（归域 10）。
-- **cp.async 只在单 stage 上验证**：多 stage double buffering 的 `wait_prior(N)` 语义、与
-  `__syncthreads()` 的组合，以及 `cp.async.ca` vs `cp.async.cg` 的差异尚未展开。
-- **Windows/WDDM 的并发上限**：`asyncEngineCount=1` 对 H2D/D2H 重叠的影响、WDDM 批处理对
-  stream 并发的限制，只做了定性观察。
-- 反例 E 的「铺满 GPU 则不再重叠」没做出对照实验，待补一个 grid 铺满版。

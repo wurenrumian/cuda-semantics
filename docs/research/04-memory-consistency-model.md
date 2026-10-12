@@ -376,24 +376,6 @@ CUDA C++ Standard Library（libcu++）：
 - Thread scopes / memory model：`thread_scope_{thread,block,cluster,device,system}`、`cuda::atomic`/`atomic_ref`、`cuda::atomic_thread_fence`、`cuda::barrier`。
 - 指南 §7.5 明确把 `__threadfence*` 定义为对 `cuda::atomic_thread_fence(seq_cst, scope)` 的等价。
 
-## 未决
-
-- **（已解决，2026-10-11）`compute-sanitizer` 注入失败**（根因 Windhawk 注入冲突；见观察 4 上方更新与
-  `tmp/docs/memory/windows-toolchain-pitfalls.md`）。停 Windhawk 后已补跑 `racecheck`
-  volatile-nonatomic / atomic：**双方 0 hazards**——这本身是一个重要校准：**racecheck 只检测 shared memory
-  hazard**，反例 ①④ 的丢更新/消息顺序是 **global memory** 上的竞争，racecheck 本来就看不见。
-  global 侧竞争的证据仍以运行数字 + PTX/SASS 为准（本篇反例 ①②④ 不变）。
-  产物 `tmp/outputs/sanitizer-2026-10-11/d04-racecheck-*.txt`。
-- **（部分完成，2026-10-11）order × scope 矩阵**：device/system 两档全矩阵已实测（观察 3.5，
-  实验 `scripts/order_matrix.cu`）。剩余：block/cluster scope、cross-order 的 RMW 语义细节
-  （`fetch_or`/`CAS` 与 `fetch_add` 在 order 上的落点是否一致）。
-- **system scope 只验到指令层**（`MEMBAR.SC.SYS` / `membar.sys`），未做真实的 device↔host 跨域发布实验（需 mapped pinned memory + host 端 spin 配合）。
-- **cumulativity / decoupled look-back（CUB 的 acquire-mask 搜索）**未动手：这是"多生产者 + 单消费者"下最能暴露 cumulativity 与 scope 关系的实战模式，留作下一步。
-- **未做 store-buffer 型 litmus**（两线程互写互读）在 `-O3` 下的编译器重排复现；本机 L2 一致 + 编译器保守，可能难复现，但值得用 PTX 反汇编确认是否存在重排空间。
-- **`volatile` 的接入作用域**：观察到 nvcc 把 `volatile` 编译为 `STRONG.SYS`，但其**模型层**的精确表述（是否始终 system scope、与 `.mmio` 的关系）需回到 PTX §8.4 原文核对后再定稿。
-
----
-
 ## 附：本次运行产物
 
 `tmp/outputs/D04/2026-10-08/`

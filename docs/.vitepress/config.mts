@@ -16,7 +16,7 @@ export default defineConfig({
     sidebar: {
       '/research/': [
         {
-          text: 'CUDA 语义（环境基线 + 12 域）',
+          text: 'CUDA 语义（环境基线 + 12 域 + 速查）',
           items: [
             { text: '00 · 环境基线', link: '/research/00-baseline' },
             { text: '01 · SIMT 执行模型', link: '/research/01-simt-execution-model' },
@@ -30,7 +30,8 @@ export default defineConfig({
             { text: '09 · 异步与流水', link: '/research/09-async-pipelines' },
             { text: '10 · 宿主侧运行时', link: '/research/10-host-runtime' },
             { text: '11 · 编译器与 UB', link: '/research/11-compiler-and-ub' },
-            { text: '12 · 架构 / 微架构', link: '/research/12-architecture-microarchitecture' }
+            { text: '12 · 架构 / 微架构', link: '/research/12-architecture-microarchitecture' },
+            { text: '13 · 原语速查', link: '/research/13-primitive-reference' }
           ]
         }
       ]

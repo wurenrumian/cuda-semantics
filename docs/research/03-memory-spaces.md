@@ -263,7 +263,7 @@ compute-sanitizer --tool memcheck .\mem_spaces.exe oob   # 越界读 8-float loc
 ```
 
 预期（本机**未观测到**，见下）：报 `Invalid __local__ read`（证明 local 是有界、每线程的真实内存区域）。
-本机实测：`Error: Target application terminated before first instrumented API call`。连 NVIDIA 自带的 `compute-sanitizer\sanitizer_smoke.exe` 都报同样错误 → **本机 sanitizer 无法注入**；`ncu` 也因 `ERR_NVGPUCTRPERM` 取不到计数器。两者在 Windows 上都需管理员权限（`EnableDebuggerInterface.bat` / `RmProfilingAdminOnly=0`），不在本 worker 权限内。本域结论不依赖它即可成立（见「未决」）。
+本机实测：`Error: Target application terminated before first instrumented API call`。连 NVIDIA 自带的 `compute-sanitizer\sanitizer_smoke.exe` 都报同样错误 → **本机 sanitizer 无法注入**；`ncu` 也因 `ERR_NVGPUCTRPERM` 取不到计数器。两者在 Windows 上都需管理员权限（`EnableDebuggerInterface.bat` / `RmProfilingAdminOnly=0`），不在本 worker 权限内。本域结论不依赖它即可成立（见「未决台账」域 03）。
 
 ### 观察 7：compute-sanitizer 复跑（2026-10-11，Windhawk 解锁后）
 
@@ -298,16 +298,3 @@ compute-sanitizer --tool memcheck .\mem_spaces.exe oob   # 越界读 8-float loc
 - **§6.4.1 Addresses as Operands**、**§6.4.1.1 Generic Addressing**。
 - **§8.3 State spaces**（内存一致性模型视角下的状态空间）。
 - **§9.7.9.1 Cache Operators**；**§9.7.9.8 ld**；**§9.7.9.9 ld.global.nc**；**§9.7.9.11 st**。
-
-## 未决
-
-- **（已解决，2026-10-11）local OOB 的 memcheck**：根因是 **Windhawk 进程注入冲突**（详见过程记忆
-  `tmp/docs/memory/windows-toolchain-pitfalls.md`；与驱动/权限无关）。停 Windhawk 后复跑
-  `memcheck --tool memcheck mem_spaces.exe oob` → **`Invalid __local__ read of size 4 bytes ... out of bounds`**
-  （带行号与 host 回溯，正是 03 反例 1「local 是有界、每线程的真实内存区域」的直接证据）。
-  产物 `tmp/outputs/sanitizer-2026-10-11/d03-memcheck-oob.txt`。
-- **ncu 计数器权限缺失**（`ERR_NVGPUCTRPERM`）。bank conflict（`l1tex__data_bank_conflicts_*`）、L1/TEX 命中需 `RmProfilingAdminOnly=0` 或管理员；本稿 bank conflict 只有 timing 级证据。
-- local vs shared 的延迟差距被循环开销稀释（1.18×）；更干净的测法（多条独立链 / 批处理）待补齐。
-- texture 只覆盖了 `__ldg` 只读通路；真实 **texture object / sampler** 路径（线性插值、边界模式等）未做。
-- register→local **spill 的触发阈值**（每线程寄存器上限、`__launch_bounds__`）归域 2 / 12；这里只指路。
-- L1 与 shared 的 **carveout**（`cudaFuncAttributePreferredSharedMemoryCarveout`）未测。

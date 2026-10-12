@@ -267,15 +267,6 @@ atomicAdd shared 0 + 1e-40f : 000116c2  9.9999461e-41
 - §9.7.3.3 `add`、§9.7.3.5 `mul`、§9.7.3.6 `fma`、§9.7.3.8 `div`、§9.7.3.13 `rcp`、§9.7.3.15 `sqrt`、§9.7.3.18 `sin` — 各指令的语法（`.rnd`、`.ftz`、`.approx`）与语义。
 - §9.7.4.4 Half Precision Floating Point Instructions: `fma` — 半精度路径的入口（本机未展开）。
 
-## 未决
-
-- 只系统验证了 **float**。double 的 FMA 收缩 / `-fmad` 行为、以及 `__fma_rn` 未单独测。
-- **半精度 / bf16 / fp8 与 tensor core（wmma/mma）** 未在本机跑；sm_89 支持 fp8 mma，属域 12 的 fragment 布局问题，待补。
-- `-use_fast_math` 是否还触发更激进的**表达式重结合 / 向量化**，未逐项确认（本篇只覆盖收缩与 approx 替换）。
-- `atomicAdd(float)` 的 global-FTZ / shared-denormal 只做了**行为验证**，未看其 SASS（`RED`/`ATOM` 上的 FTZ 修饰）；`red`（不返回旧值）与 `atom` 是否同语义待查。
-- denormal 在 sm_89 上的**性能代价**未量化（属"性能语义"，会随架构变，见域 12）。
-- `__fdividef` / `__fsqrt_rn` 等其它 intrinsic 在 fast math 下的逐项 ULP 差异未补全。
-
 ## 运行记录
 
 | 时间 | 命令 | 产物 |

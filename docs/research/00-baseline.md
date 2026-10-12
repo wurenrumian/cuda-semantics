@@ -149,9 +149,3 @@ ncu --metrics sm__cycles_elapsed.avg probe_rt.exe
 - *PTX ISA* — **Target ISA Notes**（各指令的最低 sm 要求；`.b128` 原子、`cp.async.bulk`、cluster 相关指令）。
 - *CUDA C++ Programming Guide* — **Independent Thread Scheduling**（Volta+ 起 warp 不再锁步）。
 - 本机：CUDA Toolkit 12.8 / nvcc V12.8.61、Nsight Compute 2025.1.0、Nsight Systems 2024.6.2、compute-sanitizer 2025.1.0（版本以本页表格为准）。
-
-## 未决
-
-- **admin 阻塞未解**：`compute-sanitizer` / `ncu` 需要管理员或 `EnableDebuggerInterface.bat` / `RmProfilingAdminOnly=0`。解掉后才能给域 04/06/11 补 racecheck / synccheck / initcheck 证据。
-- **驱动 ↔ toolkit 最低版本**：驱动 596.49 对 CUDA 12.8 的最低要求未逐条核对。
-- **环境探针的常态化**：已在 `experiments/EXP-0000-baseline/` 提供一键脚本；后续可考虑把它的输出存档作为「每次大改动前后」的基线快照。

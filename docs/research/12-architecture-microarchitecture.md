@@ -277,13 +277,3 @@ ncu --metrics l1tex__t_requests_pipe_lsu_mem_global_op_ld.sum,... coalesce_probe
 - **Memory Consistency Model（§8）**：scope 与 order 的语义来源。
 - **Special Registers**：`%smid`、`%warpid` 等只读特殊寄存器。
   `docs.nvidia.com/cuda/parallel-thread-execution/`
-
-## 未决
-
-- **ncu 计数器被权限阻断（ERR_NVGPUCTRPERM）**：拿不到 `l1tex__t_sectors_pipe_lsu_mem_global_op_ld.sum` 等，合并访存只有墙钟证据。要让观察和文档的 32B sector 语义对上，需管理员开 GPU Performance Counters 权限（NVIDIA 控制面板 / `NVreg_RestrictProfilingToAdminUsers`）。
-- **sm_89a / sm_89f 的拒绝是 CUDA-12.8 的实测**，而且 12.8 对任何 `f` 后缀都拒绝（连 `sm_100f` 也是）——所以「出处」里引的 `compute_100f` / `compute_100a` 示例来自比 12.8 更新的在线版指南。至于更新版（如 12.9+）对 Ada 的族目标怎么定义、哪些 (arch, suffix) 组合合法，本机未验证。
-- **cubin vs PTX 的加载行为未直接跑**：sm_75 cubin 拿到 sm_89 上应因 "no kernel image" 失败、而 PTX 可 JIT——目前只有 doc 依据，未实测（可作为秒级小验证补上）。
-- **shared carveout（L1/shared 可配置划分）未探**：可用 `cudaFuncAttributePreferredSharedMemoryCarveout` 观察；本次只动了 shared 上限。
-- **SM 内 sub-partition 结构未直接观测**：scheduler 数、每 scheduler 的 warp 槽位、寄存器文件分区——需要 ncu 的 scheduler 指标（被权限阻断）。
-- **架构相关功能单元的吞吐**（SFU / DP / tensor core / `mma` fragment 布局）本次未触及，属域 08 与更细的微架构笔记。
-- **原子落点（L2 atomic unit）与 `red` / `atom` 吞吐**未直接测；域 05 的 `publish` 实验只覆盖正确性，不覆盖 L2 解析位置。

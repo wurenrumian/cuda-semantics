@@ -304,18 +304,3 @@ dp_run: parent sync: no error / child wrote 42 (expect 42)
   - §5.1.6 *Parameter State Space*；§5.1.7 *Shared State Space*
 - **CUDA Runtime API Reference**：`cudaGetLastError` / `cudaPeekAtLastError` /
   `cudaFuncSetAttribute` / `cudaLaunchKernel` / `cudaStreamCreateWithFlags` / `cudaDeviceSynchronize`。
-
-## 未决
-
-- **（已解决，2026-10-12）compute-sanitizer**：Windhawk 注入冲突解除（见域 0）；本域已拿到
-  `deref_null` 的 memcheck 指令级判词（观察 10）。**遗留**：`memcheck` 报过的程序在 sanitizer
-  下的粘性表现（如错误后 kernel 继续跑/提前止步）未单独记录——反例 3 的粘性结论来自
-  无插桩运行，两者不冲突但未交叉验证。
-- **并发度只做了逻辑证明，没测真重叠**：本域用自旋标志位证明了 default stream 的隐式串行，
-  但没测"两个 non-blocking stream 是否真在同一时刻占用 SM"。要定量需 `nsys` 时间线
-  （`ncu` 需计数器权限 `ERR_NVGPUCTRPERM`，与 Windhawk 无关，见域 0）。
-- **CUDA 12 runtime 模块级 API**（`cudaLibrary` / `cudaKernel` / `cudaLibraryLoadData`）
-  未实测；本域只确认 runtime 不再暴露旧的 `CUmodule` 风格句柄。
-- **device-side graph launch / programmatic dependent launch (PDL)** 属于域 9 / 域 12 交界，
-  本域未展开。
-- `cudaFuncSetAttribute` 对 occupancy 的连锁影响（域 2）只点到为止。

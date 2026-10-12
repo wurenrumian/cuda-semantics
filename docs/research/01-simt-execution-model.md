@@ -236,7 +236,7 @@ pwsh -File experiments\EXP-0001-simt-execution-model\scripts\run.ps1
 | 无同步的邻居读 | `STS [R5], R0` → `LDS R7, [R4]`（无 `WARPSYNC`） | 竞争 |
 | 发散循环后的时钟 | `BSYNC B1`（@0x510）→ `CS2R R4, SR_CLOCKLO`（@0x520） | 时钟在收敛点之后 |
 
-### 观察 4：`__activemask()` 的正当用法——「发现模式」（2026-10-11 补，闭合未决 ⑤）
+### 观察 4：`__activemask()` 的正当用法——「发现模式」（2026-10-11 补，闭合未决台账 01 · 5）
 
 反例 A 证明 `__activemask()` **不能**当跨发散边的逻辑 mask；但它**有**一个与 cooperative groups
 实现一致的正当用法（Discovery Pattern）：在**同一个发散分支内部**，快照 + 分支屏障 + 再快照，
@@ -303,24 +303,3 @@ wrap（lane 30 → lane 0）也正确。对照 `baseline`（不用 activemask：
 - **§9.7.9.6 `shfl.sync`**；**§9.7.13.1 `bar`/`barrier`**；**§9.7.13.2 `bar.warp.sync`**；**§9.7.13.4 `membar`/`fence`**；**§9.7.13.9 `vote.sync`**；**§9.7.13.10 `match.sync`**；**§9.7.13.11 `activemask`**；**§9.7.13.12 `redux.sync`**。
 
 > 注：PTX ISA 的节号会随版本浮动（如 9.x 里同一条给到 §9.7.13.x / §9.7.9.6），以上为 CUDA 12.8 对应的 **PTX ISA 8.7** 编号。
-
-## 未决
-
-1. **（已解，2026-10-11）compute-sanitizer 本机不可用**：根因不是权限/注册表，而是 **Windhawk 进程注入冲突**
-   （每个新进程被注入 `windhawk.dll`，与 sanitizer 注入在 ntdll 撞车；停 Windhawk 服务后恢复，
-   详见过程记忆 `tmp/docs/memory/windows-toolchain-pitfalls.md`）。
-   已补跑 `racecheck`：`race-unsync` → **RAW hazard ×128**（d01_simt.cu:76/77，反例 C 被工具证实）、
-   `race-sync` → 0 hazards（对照），产物 `tmp/outputs/sanitizer-2026-10-11/d01-racecheck-*.txt`。
-   遗留，反例 A 的 `shfl-bad` 掩码问题 racecheck 不查（它只管 shared memory hazard）；
-   掩码类问题仍以"调用点形状 + SASS 无 `WARPSYNC`"为证。注意：Windhawk 重启会自启，跑 sanitizer 前需再停。
-2. **`ncu` 指标权限**：`ERR_NVGPUCTRPERM`。若拿到管理员，可采 branch-efficiency / divergence 指标作为域 1/12 的量化旁证。
-3. **`reduce-sync` 的 SASS 里没有逐迭代 `WARPSYNC`，但结果正确**。加 guard 后重新核对（`cuobjdump -sass -fun _Z13k_reduce_syncPi`）：SASS 中没有 `WARPSYNC`、`BSSY`、`BSYNC`，5 步被展开成带谓词的直线代码（`@!P0 LDS/STS`）。
-   也就是说，nvcc 因为控制流完全收敛，把 `__syncwarp()` 消去了；步间顺序靠的是生成的代码，而不是编程模型的保证。
-   待查：这种情况是否可靠（还是本例的巧合）。旧的 `tmp/outputs/D01/logs/sass-k_reduce_sync.txt` 是加 guard 之前的，尚未按新源重新生成。
-   对照：`k_sass` 里同一写法确实生成了显式 `WARPSYNC`。
-4. **可否构造一个非计时的 ITS 可观测演示**：例如早完成的 lane 在 `BSYNC` 之前先写一个标志，让别的 lane 读到——用来把"独立推进只到收敛点"变成可打印的证据。
-5. **（已闭合，2026-10-11）`__activemask()` 的正当用途**：Discovery Pattern 已实测（「观察 4」；
-   `activemask_good.cu`）——发散分支内"快照→分支屏障→稳定集合→集合内通信/源 lane 在集合内"合法；
-   跨出发散边界的通信仍必须先收敛。与域 6 的交叉点（cooperative groups 如何用同一模式实现
-   `coalesced_active`）留待域 6 展开。
-6. 与 **EXP-0001** 的关系：本域实验即 `experiments/EXP-0001-simt-execution-model/`（源 `d01_simt.cu`），"邻居读竞争 / ITS / `__syncwarp`"已做实，本文证据来自它。

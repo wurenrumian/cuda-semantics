@@ -464,7 +464,7 @@ Windhawk 未停时同样报
 当时已排除路径/参数/注册表（`EnableInterface` 本机已是 `0x1`），怀疑方向含管理员与驱动，
 事后证实全部误判——真凶是 Windhawk 注入。这张表留着，作为"换台机器先跑 smoke 再下结论"的提醒。）
 
-### 观察 6 — `atomicAdd(float)` 的 `.FTZ`：与 `-ftz` 无关（原未决项实测，2026-10-12）
+### 观察 6 — `atomicAdd(float)` 的 `.FTZ`：与 `-ftz` 无关（原未决项实测，2026-10-12；见「未决台账」域 05 · 5）
 
 `ftz_probe.cu`（`__global__ void k_ftz(float*, float) { atomicAdd(out, v); }`）同一源码用
 `-ftz=false` / `-ftz=true` 各编一次，SASS **完全相同**：
@@ -515,25 +515,3 @@ double 无 FTZ 一族问题。）
 - 本机 header：`include/crt/sm_20_atomic_functions.h`（`atomicAdd(float)`）、
   `sm_60_atomic_functions.h`（`atomicAdd(double)`）、`device_atomic_functions.h`（64 位整型）、
   `sm_90_rt.h`（`atomicAdd(float2/float4)`，128-bit，sm_90+）。
-
-## 未决
-
-- **（已解决，2026-10-11/12）compute-sanitizer 本机不可用**：根因是 Windhawk 进程注入冲突（见
-  观察 5 更新）；本域已拿到 shared memory 竞争的 racecheck 证据。**遗留**：`publish` 是 global
-  广播竞争，racecheck 天生不查——它的独立判定仍缺工具层证据，见下一条。
-- **反例 1 未在本机复现**（0/2400）。要把它变成「跑得出错」的 litmus，需要跨 SM 的 store-buffer /
-  message-passing 变体（域 4 的核心工具），本机尚未搭。当前判定依赖规范 + SASS/PTX。
-- **`publish` 的跨 grid 驻留问题未实测**：消费者已改为**有界自旋 + 超时报告**，本机已验证超时分支
-  会正常返回（观察 4b）；但「consumer 先占住 SM、producer 永远启动不了」这一**真死锁**场景本机尚未构造
-  （历史上 2400 轮全部在超时前收到旗子，本轮 200+200+2000 轮也是）。要复现，需要人为制造驻留压力
-  （占满 SM 后再启动生产者）或换 cooperative launch 对照；这类实验会永远等，必须在外部计时守护下做。
-- **（已解决，2026-10-11，04 篇「观察 3.5」）`ATOM…STRONG.GPU` 里 `STRONG` 与 relaxed/acquire 的
-  精确对应**：order×scope 矩阵已实测——本机 SASS 助记符的 `STRONG` 是硬件层属性、不与
-  memory order 一一对应（relaxed 原子同样 `STRONG`）；语义落点看随行的 `MEMBAR`/`CCTL.IVALL`。
-  本篇观察 2/3 的通用标签②即为此结论。
-- **（已解决，2026-10-12，观察 6）`atomicAdd(float)` SASS 出现 `.FTZ`**：与 `-ftz` 开关无关的
-  指令形态固定行为（PTX 层面即无 ftz qualifier）。仍是**本机 sm_89 观察**，其他架构未测。
-- **128-bit 原子（`.b128`）在 sm_90 的行为**未实测——本机无 sm_90，只证到「sm_89 编译失败」。
-- **浮点原子求和的可复现性**只在概念层（非结合），未做「同输入不同分块得不同低位」的最小实验
-  （域 8 的位置）。
-- `_system` 原子的 system-scope 原子性附加条件（PTX §8.1.1）本机单卡不做实测。

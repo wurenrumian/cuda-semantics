@@ -3,7 +3,7 @@ title: "域 09 · 异步与流水语义"
 type: research
 status: draft
 created: 2026-10-08
-updated: 2026-10-11
+updated: 2026-10-12
 tags: [cuda, semantics, async, streams, cp.async, pipeline, cuda-graphs, unified-memory, sm_89]
 related: [docs/plan/cuda-semantics-topic-map.md, experiments/EXP-0009-async-pipelines/README.md]
 ---
@@ -19,6 +19,37 @@ related: [docs/plan/cuda-semantics-topic-map.md, experiments/EXP-0009-async-pipe
 kernel launch、`cudaMemcpyAsync`、`cp.async` 都只是**入队或发出**；运行时除「同一
 stream 内先入队者先完成」和「你自己用事件/同步显式建立的依赖」之外，**不承诺任何顺序，
 也不承诺任何并行**。绝大多数错误来自把这两条否定读成了肯定。
+
+## "异步"不是一个保证，是五个（先分家，再看代码）
+
+| 五种「异步」分别承诺什么 | 到底承诺了什么 | 没承诺什么 |
+|---|---|---|
+| **host API 异步**（launch/copy 返回快） | 只说"**主机调用会返回**"，工作已入队 | 不说何时开始、何时结束 |
+| **stream 排序** | 同 stream 内 FIFO，跨 stream 无序 | 排序 ≠ 并行；能否重叠看资源 |
+| **设备端异步 copy**（`cp.async`） | SM 内 issue 后不占寄存器、流水化 | 和计算并行执行是**性能**承诺，读取前必须 wait |
+| **流水重叠**（double buffering） | 前一块计算与后一块搬运重叠的可能性 | 重叠量取决于资源，没"保证 ×%"
+| **graph capture/replay** | capture 记录依赖图；replay 才执行 | capture 期间不执行（反例 D）；replay 不加速"执行"本身 |
+
+读任何"我用了 async/cp.async/graph"的代码，先问它属于哪一行、承诺到哪格——五个格子
+混读、合读、读反，就是本篇所有反例的来源。
+
+## 一条时间线：四个"不同的事件"
+
+launch/Async 语境下，这四个时刻**各是各的**，语义讨论时要点名自己挂在哪一个：
+
+```
+ host 线程          ──cudaMemcpyAsync / <<<>>>──▶ 立即返回（①API 返回）
+                        │
+ stream(队列)        ②工作入队 ──── 等(前序完成) ────▶ ③工作开始 ────▶ ④工作完成
+ kernel/copy 引擎                                  (③依赖判定点)       (④只有同步/查询看得见)
+```
+
+- ①**API 返回**：只证明队里收到了。非法启动配置这类**同步**错误在①处给出；执行期错误要等同步点。
+- ②**工作入队**：stream 里可见的顺序单元；前序完成它才轮到。
+- ③**工作开始**：可以比 ① 晚得多（队列长、资源忙）；不能从①推断，也别拿返回快慢当性能结论。
+- ④**工作完成**：错误的执行期证据在之后某个同步点浮出（域 10 的错误观察点表）。
+
+每个反例都能映射到"把①当成④"或"把②当成③/④"。
 
 ## 承诺与边界
 
@@ -42,6 +73,10 @@ stream 内先入队者先完成」和「你自己用事件/同步显式建立的
   - **`--default-stream per-thread`**：stream 0 变成**每主机线程独立**的默认 stream（等价
     于用 `cudaStreamPerThread`），不再做全局隐式同步。
 - **边界**：stream 给的只是「顺序」，不是「并行」；grid 把 GPU 铺满时，后发 kernel 只能等。
+  `concurrentKernels` 查询位也**不是**运行时重叠的承诺（见关键观察）。
+- **两个"一定"都别写**：「legacy 默认 stream 一定全局串行」不对——per-thread 模式或
+  non-blocking flag 创建的 stream 都能绕开隐式同步；「用了 per-thread 就一定独立」也不对——
+  仍受资源/驱动批处理（WDDM）影响。定语要写到「**哪种语义模式下、哪种资源状态下**重叠不重叠」。
 
 ### 3. 事件（event）= 跨 stream 的显式依赖 + 计时
 
@@ -52,12 +87,51 @@ stream 内先入队者先完成」和「你自己用事件/同步显式建立的
   设备侧耗时。
 - **边界**：事件只建立**顺序/可见性**，不搬运数据。
 
+event 的 record/wait 用依赖图读最稳——**它建立的是"s2 的后续工作 ≤ e 的先前工作"，不是
+"全设备同步"**：
+
+```
+ stream s1:  K1 ──▶ Record(e1)
+                             \
+                              ╲ (e1 完成后 s2 才放行后续)
+                               ╲
+ stream s2:         其余工作 ──▶ WaitEvent(e1) ──▶ K2 ──▶ Record(e2)
+```
+
+- `WaitEvent` 只**挂住 s2 自己**在这条边后的工作；s1/s2 上写在边外的工作不受约束。
+- **两类用途别互换**：**依赖 event**（record→wait）保证"后面的工作真的排在后面"；**计时
+  event**（record→…→record→`ElapsedTime`）量"两点间设备侧耗时"。计时 event 的两点应
+  包住想测的工作、且没有其他 stream 的活夹在两点之间——不然测的是"别人的时间"。
+
+- **边界**：事件只建立**顺序/时序**，不搬运数据。
+
 ### 4. 同步 API 的作用域
 
 - `cudaStreamSynchronize(s)`：主机等到 `s` 中**已提交**的工作完成（不覆盖之后才提交的）。
 - `cudaDeviceSynchronize()`：等待**所有 stream、所有主机线程**的先前工作。
 - `cudaStreamQuery(s)`：非阻塞查询，可用来轮询。
 - **边界**：同步点同时是**异步错误**浮出水面的点。
+
+### 三种"顺序"，三套条文，别互相套
+
+时间线图里的箭头在不同层各有条文出处——混用条文是"看起来在讲同步"却讲不对的根源：
+
+| 顺序 | 由谁建立 | 条文出处 | 与另外两套怎么接 |
+|---|---|---|---|
+| **stream 顺序**（提交序） | 同 stream FIFO、launch/copy API | 编程指南 §3.2.8（异步并发执行） | 通过 kernel 边界/global barrier 变成"全局全清"；通过 event 边连接两个 stream |
+| **host C++ happens-before** | 主机线程 API 调用次序、互斥锁等 | C++ 内存模型（域 04 的 host 半侧） | host 侧"先调 return"的次序经由 API 入队传给 stream；host 写 host 内存 + launch/拷贝边界即可建立 device 读的可见性（含 pinned 的管线语义） |
+| **device memory ordering** | acquire/release、fence、原子（04/05 篇） | PTX §8 一致性模型 | 仅在**设备内**的本套条文；跨 stream 时还须先经 stream/event 建立调度依赖，才谈得上"谁先写" |
+
+三套易混点各一条：
+
+1. **stream 边界自动"全清"**：K1（stream a）→ K2（stream a）调度序成立，K1 的**全部**
+   global 写对 K2 可见。这是把两套 memory-model 条文"整个跳过"的同步——也是它最可靠的
+   价值（域 05 反例 1 的进度问题最终解法之一）。
+2. **host 条文不止管 GPU**：`cudaMemcpyAsync` 返回后立刻改 host 缓冲就是 **host 侧**
+   UB（拷贝可能在后台读它）——这是 C++ 数据竞争在 host 内存上，与 device 排序条文无关。
+3. **device 条文不出设备、也解决不了"谁先跑"**：`acquire/release`（即便 sys scope）管的是
+   原子对象上配对的序与可见性，不替你建立"consumer kernel 一定跑在 producer 之后"——那个
+   前提要先由 stream FIFO / event / grid 边界给出，才轮得到 04/05 条文说"读取顺序有效"。
 
 ### 5. `cudaMemcpyAsync` 与 pinned 内存
 
@@ -66,6 +140,15 @@ stream 内先入队者先完成」和「你自己用事件/同步显式建立的
   前基本已把这次 staging 做完。编程指南的原话：「Async memory copies might also be
   synchronous if they involve host memory that is not page-locked.」
 - **边界**：`Async` 还依赖当前上下文/设备（§11.13.1）；D2H 到 pageable 同理。
+
+「Async 是否真异步」的完整判别式是**四个变量一起看**（反例 A 只锁了第一个）：
+
+| 变量 | 本机证据/规则 |
+|---|---|
+| 内存类型 | pinned → 真异步;pageable → 主机侧同步（反例 A：33 ms vs 0.013 ms） |
+| 方向 | H2D 与 D2H 都受上条约束;D2H 还会为"最终到达 host"做同步尾 |
+| 运行时/驱动 | WDDM 批处理可能延迟提交（Windows 特有,见未决） |
+| 资源 | copy engine 数（`asyncEngineCount`）为 1 时 H2D/D2H 与计算的重叠有限 |
 
 ### 6. `cp.async`：把「搬运」异步化（sm_80+，本机支持）
 
@@ -76,6 +159,29 @@ stream 内先入队者先完成」和「你自己用事件/同步显式建立的
 - **必须在 wait 之后**才能读那块 shared；否则是在与 async proxy 的写入竞争（反例 C）。
 - 变体：`cp.async.ca`（可走 L1，支持 4/8/16B） vs `cp.async.cg`（绕过 L1，仅 16B）。
 - **边界**：目标只能是 shared，不到寄存器；完成的可见性由 wait + `__syncthreads()` 建立。
+
+用状态图读它的三步协议（谁在受约束、等什么）：
+
+```
+ [issue]  cp.async  ──发出──▶ (async proxy 在搬,shared 还不可读)
+     │
+ [commit] cp.async.commit_group ──▶ 这批 copy 归组、跟着后续同组指令走
+     │
+ [wait]   cp.async.wait_group N ──▶ 等"还剩 N 组未完成"就放行本线程继续
+     │
+ [可读]   wait 之后(通常再 __syncthreads() 让全 block 都过线) ──▶ shared 可读
+```
+
+三条参与规则容易漏：
+
+1. **每个线程约束自己发出的那批**：`commit_group`/`wait_group` 是**逐线程**的簿记——线程 A
+   wait 不到线程 B 的组。要让 warp/block 都能读，wait 后要 `__syncthreads()`（反例 C 的
+   正确版正是 LDGSTS→DEPBAR→BAR.SYNC 三连）。
+2. **`wait_prior(N)` 是"还剩 N 组"**：`wait_group 0` = 全落地;`wait_group 1` = 允许最新一组
+   还在路上（流水线的留一手）。
+3. **proxy 边界**：async proxy 的写对普通访存的可见性**只有 wait 建**；`__syncthreads()` 的
+   屏障语义替代不了 wait——这正是反例 C 的 SASS 对照里，删了 `DEPBAR` 后 `BAR.SYNC` 拦不住
+   竞争的原因。
 
 ### 7. CUDA Graphs：连「提交」也异步化
 
@@ -192,8 +298,13 @@ E:\NVIDIA\CUDA\v12.8\compute-sanitizer\compute-sanitizer.exe --tool racecheck as
   capture 返 `cudaErrorStreamCaptureUnsupported`。
 - **TMA 探针**（`tma-sm89.log`）：`error : Feature 'cp.async.bulk' requires .target sm_90 or
   higher`；`tma-sm90.log` 干净通过（只编译、不运行）。
-- **compute-sanitizer**：**本机不可用**。对任何 CUDA 程序（含最小 `hello`）都只输出
-  `Error: Target application terminated before first instrumented API call`，退出码 1。见「未决」。
+- **compute-sanitizer（2026-10-12 解锁后）**：`racecheck cpasync`（正确版）**0 hazard**；
+  `racecheck cpasync-racy` 报 **5 组 hazard**（每组 4096 对，写方点名在
+  `cuda_pipeline_helpers.h:203` 的 `cp_async`——**异步代理的写被 racecheck 记为访问方**），
+  读方正是 `async_pipelines.cu:202` 的未-wait `LDS`。反例 C 由"行为数据 + SASS 缺 DEPBAR"
+  升级为三重证明（行为 + 指令 + 工具）。产物 `tmp/outputs/sanitizer-2026-10-12/d09-*`。
+  （解锁前的失败记录：对任何 CUDA 程序只报
+  `Error: Target application terminated before first instrumented API call`；根因 Windhawk 注入冲突，见域 0。）
 
 产物：`tmp/outputs/D09/2026-10-08/`（各模式 `.txt`、`sass/`、构建日志、TMA 探针日志）。
 
@@ -217,11 +328,13 @@ E:\NVIDIA\CUDA\v12.8\compute-sanitizer\compute-sanitizer.exe --tool racecheck as
 
 ## 未决
 
-- **compute-sanitizer 在本机不可用**（2025.1.0 + driver 596.49，对最小程序也注入失败）。
-  本域因此**没有** racecheck/synccheck 证据，反例 C 靠「错值 + SASS 缺 `DEPBAR`」佐证。需
-  在别处补装/换版本后重验，或把「工具在本机失效」写进基线（域 0）与 topic map。
+- **（已解决，2026-10-12）racecheck 对反例 C 的独立判定**：Windhawk 注入冲突解除后已补跑
+  （见「关键观察」），racy 版 5 组 hazard、正确版 0。**遗留校准**：racecheck 能看见
+  async-proxy 的写是本次实测事实（`cp_async` 出现在写入方堆栈里），但"它对每类异步机制都
+  有效"不应推广——工具对 proxy 的覆盖随版本/机制可能变化，未见例外情形时仍以 SASS `DEPBAR`
+  + 行为数据兜底。
 - **`ncu` / `nsys` 未跑**：重叠率、copy engine 利用率、SM 占用等只用了墙钟时间；时间线证据
-  待补（域 12 的性能语义会用到）。
+  待补（`ncu` 需计数器权限 `ERR_NVGPUCTRPERM`，与 Windhawk 无关）。
 - **统一内存未实测**：`cudaMallocManaged` / prefetch / 迁移语义待做（归域 10）。
 - **cp.async 只在单 stage 上验证**：多 stage double buffering 的 `wait_prior(N)` 语义、与
   `__syncthreads()` 的组合，以及 `cp.async.ca` vs `cp.async.cg` 的差异尚未展开。

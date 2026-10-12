@@ -3,7 +3,7 @@ title: 域 06 —— 同步原语（__syncthreads / __syncwarp / 命名屏障）
 type: research
 status: draft
 created: 2026-10-08
-updated: 2026-10-11
+updated: 2026-10-12
 tags: [cuda, semantics, synchronization, barrier, syncwarp, named-barrier, mbarrier, sm_89]
 related:
   - docs/plan/cuda-semantics-topic-map.md
@@ -19,6 +19,33 @@ related:
 ## 一句话
 
 同步原语本质上是**一个「到达 + 可见性」的约定**：屏障只对它名下、且**尚未退出（non-exited）**的线程负责——等这些线程都到达之后，它们在屏障前对 shared/global 的访问才彼此可见。它**不承诺**谁会到达，也**不跨 block**。从 Volta 起（含 sm_89）线程是逐线程执行的，所以"尚未退出的线程（non-exited threads）"这个概念是本域的关键。
+
+## 先问三个问题，再挑原语
+
+"同步"这个词在 CUDA 里混了五种机制，选型前先过三问：**等谁？建立什么顺序？覆盖多大范围？**
+
+| 问题 | 回答它的是 |
+|---|---|
+| **要不要等**——等待方是否阻塞到"参与者到齐" | 执行屏障（`__syncthreads`/`__syncwarp`/命名屏障/`grid.sync`/`cuda::barrier`）会等；**fence、原子、event 依赖不"等完所有人"**——fence 只给本地操作定型，原子只在对象上排队 |
+| **建立什么顺序**——只保屏障点前后的读写可见，还是建立完整的 happens-before | 屏障自带"屏障点"语义；fence + 原子组合（04 的 message-passing）给出一对操作之间的序；`cuda::barrier` 则是"屏障 + 显式 scope/order"的打包 |
+| **覆盖多大范围**——warp / block / grid / 全系统 | warp 原语、CTA 原语、`grid.sync()`（cooperative launch）、host 侧 stream/event |
+
+按这五族把全景摊开（右边标注后文小节）：
+
+| 机制族 | 典型原语 | 等谁 | 建立什么 | 范围 |
+|---|---|---|---|---|
+| ① 执行屏障 | `__syncthreads`、`__syncwarp`、命名屏障 | 参与线程**都到达** | 屏障点前后访问对参与者可见 | warp / block |
+| ② fence | `__threadfence_block/_device/_system` | **无人等待** | 把"之前"的读写压进作用域内所有观察者可看到的次序 | 按 scope |
+| ③ 原子通信 | acquire/release 原子 load/store | 只在**原子对象**上排队 | 一对 release→acquire 的消息传递序 | 按 scope |
+| ④ 异步等待 | `cuda::barrier`/`mbarrier`、`cudaEvent*`/stream wait | 到达/完成**事件** | 屏障+order 打包 / 工作依赖 | block / stream |
+| ⑤ host 同步 | `cudaDeviceSynchronize`、`cudaStreamSynchronize` | host **阻塞**至设备工作完成 | kernel 边界（提交间的全局顺序点） | grid / stream |
+
+两个最常见的组合拳，放在本域的定型认识里：
+
+- **屏障管"等"，memory order 管"看"**——`__syncthreads()` 之后的可见性只覆盖 block；
+  跨 block 的读写序要靠 ②+③ 协议（04 篇）。
+- kernel 边界（提交完成）是 CUDA 里**最可靠的同步**：一个 grid 的写下一个 grid 全部可见——
+  但它也是最粗的：建立的是"全 grid 全清"的全局顺序，代价和粒度不灵活（域 10）。
 
 ## 承诺与边界
 
@@ -42,6 +69,68 @@ related:
 - **命名屏障 0..15**：`bar.sync 0`（无 count）就是 `__syncthreads()`；`bar.sync id, count` 让一个 block 里的不同子组各自同步（本机实验用它把 256 线程分成两半）。
 - **跨 block 没有隐式同步**：唯一手段是 `grid.sync()`（cooperative launch）、cluster（sm_90，本机无）或自建原子协议 + 带 device scope 的 fence/原子。
 
+> 上表「编译成」一列是**本机 SASS 观察**（观察 1 定点核对），不是语义定义——换 arch/mark 可能变；
+> 语义以左列的原语含义与右侧的"等待谁/可见性"为准。SASS 对照证据按"语义在先、指令佐证在后"
+> 的次序放在 §本机验证，读表时别倒着用（从 `BAR.SYNC` 反推谓词参与规则是域 07 会专门拦的坑）。
+
+### 屏障管"等"，序管"看"：两个最小场景
+
+**场景 A（block 内、跨 warp 的生产者-消费者）**——一堵墙就够：
+
+```cpp
+__global__ void k_intra_block(float* buf, int n) {
+  __shared__ float tile[256];
+  // warp 0 是"生产者"：把输入装进 tile
+  if (threadIdx.x < 128) tile[threadIdx.x] = compute(threadIdx.x);
+  __syncthreads();                       // ① 等待：两半到齐
+  // warp 1 是"消费者"：读 tile —— ② 可见性由同一个屏障覆盖
+  float v = tile[threadIdx.x - 128];
+  …
+}
+```
+
+生产者写 `tile`、消费者读 `tile`，中间**只有一堵 `__syncthreads()`**：既是"等齐人手"，
+又是"写对读者可见"——因为范围都在 block 内。**不需要任何 fence 或带 order 的原子**。
+
+**场景 B（跨 block 的生产者-消费者）**——一堵墙不够，要"齐装二件套"：
+
+```cpp
+__global__ void k_producer(int* flag) {
+  buf[0] = answer;                                   // ① 普通写（对别的 block 何时可见，无承诺）
+  __threadfence();                                   // ② 排序：把上面的写"压"出去（device 范围）
+  atomicExch(flag, 1);                               // ③ 原子立旗（relaxed + device）
+}
+__global__ void k_consumer(int* flag, int* out) {     // 需驻留/顺序保证，见 05 反例 1 的有界自旋
+  while (bounded_spin()) ;                           // ④ 有界等待旗
+  __threadfence();                                   // ⑤ acquire 侧：把旗的"读到"变成先后
+  out[0] = buf[0];
+}
+```
+
+为什么 B 需要"fence + 原子旗"而不是一堵墙：**跨 block 没有屏障原语**（除 `grid.sync()`），
+等待只能自建（自旋/事件），而自旋读到的旗子本身不携带"buf 写完了"的顺序——所以等待（④）
+与顺序（②⑤）分属机制 ③ 和 ②①；缺一件都是 04 篇反例的形状（丢消息/看不见）。
+两个场景在同一份"生产者-消费者"词面下混合使用，是本域最常见的张冠李戴。
+
+**何时两件同时要**：等待方在等"数据就叫到了"而不是"人到齐"时（B）；或等待本身建在
+原子通信（消息标志）上时。纯粹"分阶段干活"（A）用屏障即可，加 fence 是画蛇添足——也加不了
+跨 block 的任何保证。
+
+### 命名屏障细则：id、count、一致性、复用
+
+`bar.sync id, count`（内联 PTX 上一等公民，cooperative groups 的 tile >32 也 builds 在上）：
+
+| 规则点 | 内容 | 违反的后果 |
+|---|---|---|
+| **barrier ID** | 每个 CTA 有 0..15 共 16 个命名屏障；**id 0 无 count 写法就是 `__syncthreads()`**（全 block 参与） | id 混用、双方用不同 id 到同一物理屏障 → 等不到，相互 wedge |
+| **到达计数** | `count` = 期望到达的线程数，**必须 32 的倍数**（本机 ptxas 直接拒绝编译，见观察 3） | 少到、多到或非倍数 → 屏障永远不满足或编译失败 |
+| **参与一致性** | 同一物理屏障的**所有参与者必须用相同的 (id, count)** 调用；这与"全 block 隐式参与"的 `__syncthreads()` 不同——`__syncthreads()` 不用协商 count，条件**在整块上一致**即合法 | 各自传不同值 → UB / wedge；这层"要不要协商"是它与 `__syncthreads()` 最本质的语义差别 |
+| **复用** | 满足一次后该 (id) 屏障释放，可立刻复用；但若上一次还**没满足**，再发出第二次到达同一 id 的调用会混乱 | 典型如把 tile 划成多块**顺序**复用屏障时，天然安全；并发复用同 id 要额外协议 |
+
+与 `__syncthreads()` 的一个对照记忆：后者**没有 count**——语义层要求"条件在整块上一致"（UB
+边界见反例），把它从"人来协商"的负担变成"编译器/程序员保证一致"的负担；命名屏障把这一致性
+变成**显式契约**（谁来、几个人、id 一致），换来了"子组各归各"的分治能力。
+
 ### 不承诺什么（边界）
 
 1. **不承诺谁会到达**。你没让线程来，它就不来 —— 后果见下节。
@@ -52,6 +141,25 @@ related:
 6. **屏障不产生跨 scope 的 release/acquire 语义**；需要跨观察者时配 fence/原子（域 4）。
 
 ## 反例（想当然会错）
+
+> **先看安全边界再读实验**：变体 B 是**故意写成永不到达**的演示——整个闭环是
+> 「kernel 卡住 → **host 线程轮询**（每 10 ms 打一次 `cudaStreamQuery`）→ 截止 0.5 s 判 wedge
+> → 打印实测秒数并 `_exit(0)`」，外层 run.ps1 再套 30 s 硬超时。按时序读：
+>
+> ```
+>   发散屏障 kernel 启动 ·一半 thread 永远到不了 BAR.SYNC
+>            │
+>            ▼
+>   host 看门狗轮询 ──超 0.5s──▶ 判 WEDGED → 打印耗时 → 结束进程
+>            │ 0.5s 内恢复(未发生)
+>            ▼
+>           正常完成
+> ```
+>
+> 两个必须分开的层次：这个看门狗是**实验程序在 host 侧的外部保护**（它观察"kernel 没完"），
+> **不是 CUDA kernel 内的取消机制**——CUDA 没有任何"从设备侧叫停 kernel"的语言原语，
+> 卡住的 kernel 只能被 host 端（看门狗/`_exit`/驱动 TDR）从外面止住。任何"我在 kernel 里
+> 加个超时就不会挂"的想法都属此列：设施在 host，kernel 自己停不下来。
 
 **想当然**：「`__syncthreads()` 放进 `if` 分支、只有一半线程到 → 一定死锁」。真相反过来更有教学价值：
 
@@ -159,20 +267,54 @@ ptxas fatal   : Ptx assembly aborted due to errors
 
 `count` 不是 32 的倍数 → 直接拒绝编译。对应 PTX ISA："When specifying a thread count, the value must be a multiple of the warp size."
 
-### 观察 4：sanitizer 在本机被阻塞（诚实记录）
+### 观察 4：sanitizer（2026-10-12 更新：已解锁，拿到工具判词）
 
-本机 `compute-sanitizer` **无法注入**，连一个只调 `cudaGetDeviceCount` 的 trivial 程序都报错：
+> **2026-10-11/12 更新**：此前"无法注入"的根因是 **Windhawk**（进程 mod 注入平台）与
+> sanitizer 注入撞车（详见 00 篇「不承诺」与过程记忆
+> `tmp/docs/memory/windows-toolchain-pitfalls.md`）；停 Windhawk 服务后全部工具正常。
+> **重启后自启**，每次跑 sanitizer 前需再停（2026-10-12 的下列数据即重新停过一次才跑成的）。
 
-```text
+解锁后在本域补跑（产物 `tmp/outputs/sanitizer-2026-10-12/d06-*`）：
+
+```
+compute-sanitizer --tool racecheck sync_demo.exe smem-order-unsync
+  → Race reported between Write access at k_smem_order_unsync+0x80 ...（1 error hazard）
+compute-sanitizer --tool racecheck sync_demo.exe smem-order-sync
+  → RACECHECK SUMMARY: 0 hazards
+compute-sanitizer --tool synccheck sync_demo.exe divergent-syncthreads
+  → 程序照常 FINISHED；SYNCCHECK 无违规（ERROR SUMMARY: 0 errors）
+compute-sanitizer --tool synccheck sync_demo.exe named-barrier
+  → ERROR SUMMARY: 0 errors
+```
+
+三条**工具判词**都各自有教学价值：
+
+1. **"竞争看起来正确"被 racecheck 打穿**——观察 2 里 `smem-order-unsync` 行为数据 0/256 错值，
+   racecheck 却给出了 hazard（错误计数 1）。这正是"工具看内存访问形状，不看运行结果"的样板，
+   眼见为实的 0 错值不能作为无竞争证明。
+2. **synccheck 没揪住 A 变体是"应该的"**——A（EXIT）在运行时屏障**确实被满足**（另一半已退出、
+   从计数摘除），没有可观察的违规；UB 危害在此派不出运行时证据。synccheck 是**运行时检测器**：
+   只有真的有人带着不一致状态到达物理屏障才报警，"这段代码在别的分支布局下会翻车"属于
+   语义层判断（本稿按 UB 处理）。
+3. **synccheck 对 WEDGED 场景也给不出判词**——alive 变体套上 sanitizer 后仍是 wedge（看门狗照样
+   兜底打印），挂着的线程在合法等待、没到的根本不在屏障点，无"违规"可报。死锁不是"栅栏违规",
+   是"永不满足"——前者工具能抓，后者只能靠外部计时确认不死。
+
+（以下为**解锁前**的历史记录，保留作现场存档：）
+
+```
 $ compute-sanitizer --tool racecheck sync_demo.exe smem-order-unsync
 ========= COMPUTE-SANITIZER
 ========= Error: process didn't terminate successfully
 ========= Error: Target application terminated before first instrumented API call
 ```
 
-同机 `ncu` 能 attach，但计数器被拒：`ERR_NVGPUCTRPERM`。两者都需要**管理员权限 / 性能计数器权限**，而当前用户不是管理员（`IsAdmin=False`；`EnableDebuggerInterface` 注册表项已为 1）。所以 racecheck / synccheck 的"工具判词"只能留待有权限的环境复核（探针见 `_sanitizer-probe/`）。本节的所有正确性论断都用**行为观察 + SASS** 独立佐证，不依赖 sanitizer。
+同机 `ncu` 能 attach，但计数器被拒：`ERR_NVGPUCTRPERM`（GPU 性能计数器权限，仍需管理员，
+与 Windhawk 问题无关，见 00 篇）。当时竞争/可见性结论全部用**行为观察 + SASS** 独立佐证
+——解锁后这些结论与工具判词**全部吻合**，佐证方法本身经受住了复核。
 
-> 产物：`tmp/outputs/D06/2026-10-08/`（`sass-key.txt`、`run-*.txt`、`ptxas-badsync.txt`、`_sanitizer-probe/`）。
+> 产物：`tmp/outputs/D06/2026-10-08/`（`sass-key.txt`、`run-*.txt`、`ptxas-badsync.txt`、`_sanitizer-probe/`；
+> 解锁后补跑在 `tmp/outputs/sanitizer-2026-10-12/d06-*.txt`）。
 
 ## 出处
 
@@ -190,9 +332,12 @@ $ compute-sanitizer --tool racecheck sync_demo.exe smem-order-unsync
 
 ## 未决
 
-- **`compute-sanitizer` 本机不可用**（非管理员 / 权限）。需要：以管理员运行，或配置 GPU 性能计数器/调试权限，再复核 `racecheck`（shared-memory hazard）与 `synccheck`（发散屏障 / barrier 误用）。当前结论靠行为 + SASS。
+- **（已解决，2026-10-12）`compute-sanitizer` 复核**：racecheck（smem-order-unsync hazard /
+  sync 对照 0）、synccheck（无运行时违规报告，见观察 4 的两条"给不出判词"的校准）已补；行为 +
+  SASS 的结论与工具判词吻合。**遗留**：synccheck 类工具对"UB 尚未发生"的分支布局（反例 A 形状）
+  天生无感，语义层判断仍以规范原话为准。
 - 反例 A"EXIT 就不挂"是否可视为**实际安全**？文档层面仍是 UB（条件在整块上并不一致）。本稿按 **UB 处理**，不鼓励依赖。若确实只让一部分 lane 参与 warp 同步，正确写法是给 `__syncwarp` 传一个**明确的、恰好覆盖这些 lane 的 `mask`**——不要用 `__activemask()` 现算（它只反映调用瞬间的活跃 lane，不保证涵盖将来才会加入的线程，因此不能用来重新收敛）。
-- **WEDGED 的可复现性**：本机观察到的是"看门狗轮询（实测 ~0.76–0.78 s）期间 kernel 仍未完成"，消息里打印的是**实测秒数**；若某台机器启用了 Windows 的 TDR（GPU 超时恢复，默认约 2s），同样的自旋内核可能被驱动直接掐断，此时 `cudaStreamQuery` 会返回错误、程序打印"kernel aborted"而非 WEDGED。两种表现都是"发散屏障得不到满足"，但脚本观察到的文字会不同。
+- **WEDGED 的可复现性**：本机观察到的是"看门狗轮询（实测 ~0.76–0.78 s）期间 kernel 仍未完成"，消息里打印的是**实测秒数**；若某台机器启用了 Windows 的 TDR（GPU 超时恢复，默认约 2s），同样的自旋内核可能被驱动直接掐断，此时 `cudaStreamQuery` 会返回错误、程序打印"kernel aborted"而非 WEDGED。两种表现都是"发散屏障得不到满足"，但脚本观察到的文字会不同。（本次在 sanitizer 下复跑 alive 变体时实测：看门狗打印变成 ~5 s——插桩拖慢导致阈值后的轮询错过更多周期，也印证"实测秒数、非固定值"这一点。）
 - **命名屏障资源与 occupancy**：`tiled_partition` >32 会占用命名屏障，16 个上限如何影响 residency —— 待实测/查证。
 - **`cuda::barrier` / `mbarrier`**：仅概念了解，尚未在本机跑最小例（sm_89 支持 mbarrier + `cp.async`，留待域 9）。
 - **grid.sync()**：本机单卡可做 cooperative launch 最小验证，未跑。

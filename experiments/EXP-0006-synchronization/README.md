@@ -49,10 +49,11 @@ done（2026-10-08）· 见 `docs/research/06-synchronization.md`
 
 ## 未决 / 阻塞
 
-- **`compute-sanitizer` 在本机无法注入**：任何 CUDA 程序（含 trivial）都报
-  `Error: Target application terminated before first instrumented API call`。
-  同机 `ncu` 能 attach 但计数器报 `ERR_NVGPUCTRPERM`。两者都需要 admin/权限；
-  当前用户非管理员。racecheck / synccheck 的观察待有权限环境复核。
+- **（已解决，2026-10-12）racecheck / synccheck 复核**：Windhawk 注入冲突解除后已补跑——
+  `racecheck smem-order-unsync` 报 hazard（1 error）、`smem-order-sync` 0 hazard；
+  `synccheck divergent-syncthreads/named-barrier` 无运行时违规（校准注记：UB 未发生的分支
+  与 wedge 场景 synccheck 均无从判词，见研究稿观察 4）。`ncu` 计数器权限（ERR_NVGPUCTRPERM）
+  仍待管理员。
   （探针程序与其输出在 `tmp/outputs/D06/2026-10-08/_sanitizer-probe/`。）
 
 ## 运行记录
@@ -60,3 +61,4 @@ done（2026-10-08）· 见 `docs/research/06-synchronization.md`
 | 时间 | 命令 | 产物 |
 |---|---|---|
 | 2026-10-08 | `scripts/run.ps1` | `tmp/outputs/D06/2026-10-08/` |
+| 2026-10-12 | racecheck/synccheck 各模式（`compute-sanitizer`, Windhawk 停服后） | `tmp/outputs/sanitizer-2026-10-12/d06-*.txt` |

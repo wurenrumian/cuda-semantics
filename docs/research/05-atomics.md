@@ -3,7 +3,7 @@ title: 域 05 — 原子语义
 type: research
 status: draft
 created: 2026-10-08
-updated: 2026-10-11
+updated: 2026-10-12
 tags: [cuda, semantics, atomics, memory-model, sm_89]
 related: [docs/plan/cuda-semantics-topic-map.md, experiments/EXP-0005-atomics, tmp/outputs/D05]
 ---
@@ -18,6 +18,71 @@ related: [docs/plan/cuda-semantics-topic-map.md, experiments/EXP-0005-atomics, t
 CUDA 的原子只承诺**「在某个作用域内，一次读-改-写不可分割」**；默认 intrinsic（`atomicAdd` 等）是
 **relaxed 顺序 + device 作用域**，它**不**附带任何内存序、不充当屏障、不建立 happens-before——
 「原子」和「有序」是两件正交的事。
+
+## 与域 04 的分工
+
+04 讲的是**内存模型的通用规则**(读写彼此如何"对齐看":happens-before、order、scope 的语义底座);
+05 讲的是**原子这个 API 家族**(哪些操作能当"最小不可分步"用、每个接口怎么传 scope/order、
+怎么用 CAS 自己搭任意 RMW)。关系是"04 给语义底座,05 给使用姿势":
+
+```
+        ┌─────────────────────────────────────────────┐
+        │  域 04 ·内存模型(通用规则)                  │
+        │  order(relaxed/acquire/release…) 定义       │
+        │  ——"这一次读写相对谁有序"                   │
+        │  scope(cta/gpu/sys) 定义                   │
+        │  ——"这个保证对谁生效"                      │
+        └──────────────────┬──────────────────────────┘
+                            │ 作为参数被「原子 API」消费
+                            ▼
+        ┌─────────────────────────────────────────────┐
+        │  域 05 ·原子 API 家族(本篇)                │
+        │  原子性 = 一次 RMW 不可分割(永远有)         │
+        │  order/scope = 可选增强(按需传参)           │
+        │  自建任意 RMW = atomicCAS 循环              │
+        └─────────────────────────────────────────────┘
+```
+
+两篇会重复出现同一批词(order/scope/fence),但 04 把它们当**定义**讲,本篇把它们当**参数**讲——
+看 05 的反例时,判定规则一律回到 04(尤其 04「四概念大白话」与「观察 3.5」的 SASS 落点表)。
+
+CUDA 的原子只承诺**「在某个作用域内,一次读-改-写不可分割」**;默认 intrinsic(`atomicAdd` 等)是
+**relaxed 顺序 + device 作用域**,它**不**附带任何内存序、不充当屏障、不建立 happens-before——
+「原子」和「有序」是两件正交的事。
+
+## 原语地图:先分清功能,再谈参数
+
+把"原子"四个功能群分开,而不是一切从 `atomicAdd` 出发:
+
+| 功能群 | 干什么 | 传统 intrinsic(默认 relaxed + device,无参数) | cuda::atomic / atomic_ref(scope/order 可传) |
+|---|---|---|---|
+| **RMW**(不可分地改) | 加/减/min/max/位运算/交换 | `atomicAdd` `atomicSub` `atomicMin` `atomicMax` `atomicAnd/Or/Xor` `atomicExch` | `fetch_add/or/xor/max…`、`exchange` |
+| **条件更新**(可自建任意 RMW) | 期望值仍相等才写 | `atomicCAS` | `compare_exchange_weak/strong` |
+| **原子读/写** | 单次读/写，可携带内存序 | (旧式无对应物;要靠 `volatile` + fence 凑,不推荐) | `load` / `store` |
+| **fence**(只排序,不原子) | 给前后内存操作定型 | `__threadfence_block/_device/_system` | `cuda::atomic_thread_fence` |
+
+注意第一行的"不可分地改"与第四行的"只排序不原子"是**两种不同保证**:RMW 永远不可分割,但 relaxed
+的 RMW 不排任何别的东西;fence 恰好相反,不针对任何对象,只约束它前后的操作。
+
+### 速查表：返回值、成败判定与支持类型
+
+（类型明细为本机 header 实测：CUDA 12.8、sm_89，见 §本机验证；**传统 intrinsic 与 libcu++
+接口的差别在"成败/返回值怎么给"与"参数往哪放"两处，容易互相套错**。）
+
+| 接口 | 本机支持类型 | 返回值 | 成功/失败怎么判 | order/scope 放哪里 |
+|---|---|---|---|---|
+| `atomicAdd/Sub/Min/Max/And/Or/Xor/Exch(p, v)` | 整型 32/64；`float`（仅 Add，sm_20+）；`double`（仅 Add，sm_60+） | 提交前的旧值 | 没有"失败"分支——RMW 无条件提交 | **没有参数**：默认 relaxed + device；scope 用 `_block`/`_system` **后缀** |
+| `atomicCAS(p, cmp, val)` | 整型 32/64 | 提交瞬间 `*p` 的值 | **返回值不区分成败**：`== cmp` 即成功，否则失败且未写 | 同上（无 order 参数） |
+| `cuda::atomic_ref<T, S>` `load/store(order)` | 任意标量（宽度取决于架构，`atomicity` 由编译产物保证） | load 返回值；store 无返回 | 无失败分支 | order 是**函数参数**，scope 是**模板参数** |
+| `compare_exchange_strong/weak(expected, desired, …)` | 同上 | **bool**：成败 | 失败时 `expected` 被**自动更新为当前值**，直接拿去重试 | 同上（成败一参一函数） |
+| `fetch_add/or/max/…(v, order)` | 同上 | 提交前的旧值 | 无失败分支 | 同上 |
+
+三件容易踩的接口差别：① 传统 `atomicCAS` 失败也**返回值**（送你情报但不给结论），C++ 的
+compare-exchange 直接给结论还顺手更新 `expected`——别把两边的"重试循环"写串。② **不要把
+`atomicAdd(float)` 的存在推广成"原子全家桶都有重载"**：`Min/Max/Exch/CAS` 的浮点重载本机
+（sm_89）全都没有，PTX 也没有 `atom.max.f32`（重载报错原文见反例 2）——浮点 max/min 出错
+比"原子性欠缺"更具迷惑性。③ `_block`/`_system` 是**后缀选择 scope**；`cuda::atomic_ref`
+是**模板参数**——两种 API 的 scope 表达位置不同，抄示例代码时别混。
 
 ## 承诺与边界
 
@@ -62,9 +127,46 @@ CUDA 的原子只承诺**「在某个作用域内，一次读-改-写不可分�
 | 作用域 scope | cta / gpu / sys | gpu(device) | `_block` / 无后缀 / `_system` |
 | 顺序 order | relaxed / acquire / release / acq_rel / seq_cst | **relaxed** | `__threadfence*()`、`cuda::atomic_ref` |
 
+### 三个轴真的独立吗——拿同一个操作转一圈
+
+固定"操作 = `fetch_add(1)`",只动另外两个轴,行为差异全在 order/scope 上,操作本身的
+"读旧值-加-写回-返回旧值"一字不变:
+
+- `fetch_add(1, relaxed)` × device:不可分割地加;和谁都不排座次。
+- `fetch_add(1, release)` × device:不可分割地加;且把「我之前的读写」排到它前面。本机
+  SASS 落点是 `MEMBAR.ALL.GPU` + 原子指令(见 04「观察 3.5」)。
+- `fetch_add(1, relaxed)` × cta(scope `_block`):只在 block 内不可分割不排座次;跨 block 的
+  观察者不在 `_block` scope 的承诺范围里。
+
+即:**relaxed 砍的是"排序",不是"原子性"**——原子 RMW 对原子对象的不可分割在任何 order 下都保留。
+按同样方式,一个"读-改-写"给的参数空间是 5 种 order × 3 种 scope × 原子对象本身;04 的
+order×scope 矩阵(`EXP-0004`)逐个量过本机落点,可交叉查阅。
+
+### `fetch_add` 到底返回什么——old = 10, new = 11
+
+`fetch_add` 容易被误读成"另一种内存顺序"或"另一种同步机制"。它不是——它就是 `atomicAdd`
+的 libcu++ 对应物:**原子地把"旧值+增量"写回去,并返回旧值**(以及按指定的 order 携带的
+任何排序效果):
+
+```cpp
+cuda::atomic_ref<int, cuda::thread_scope_device> c(x);
+// 假设 x 当前值是 10。
+// 两个线程各跑一行 c.fetch_add(1, …):
+//   线程 A:读到旧值 10 → 写回 11 → 返回 10
+//   线程 B:原子单元上只能串行——读到旧值 11 → 写回 12 → 返回 11
+// 两行之后 x == 12;谁返回 10、谁返回 11 由硬件原子单元一次性裁决,两个 RMW 绝不撞车。
+```
+
+对照老接口:`atomicAdd(&x, 1)` 与 `c.fetch_add(1, relaxed)`**(同 scope=device)** 返回值
+一样、原子性一样,唯一区别是后者多了 order 参数可传。`old=10, new=11` 这种对子是理解
+所有 RMW 的钥匙:**返回的都是"动手之前"的值,新值只能再读回来或自己算**(新值 = 旧值 + 增量)。
+
 ## 反例
 
 ### 反例 1（核心，语义级）：「用了 atomic 就建立了同步/顺序」
+
+> 验证维度：**排序 / 同步**（即便原子性完好，也无顺序、无可视性、无进度保证）——本反例同时踩了
+> relaxed 原子不排序（前半）与跨 block 自旋进度不受控（后半「更要命的坑」）。
 
 这是最贵的误解。经典 flag（旗子）+ payload（数据）生产者-消费者：
 
@@ -88,9 +190,30 @@ for (int i = 0; i < n; ++i) if (data[i] != i + 1) ++b;
 `pub_producer` / `pub_consumer`（一个 block、一个线程干活，`kSpinLimit` 同名）。
 
 默认 `atomicExch` 是 relaxed：它**不**保证 producer 的 `data[]` 对 consumer 可见，也**不**保证
-consumer 的 `data[]` 读发生在看到 `ready` 之后。这是一个**数据竞争（UB）**，正确写法要
-producer `__threadfence()`（release）＋ consumer `__threadfence()`（acquire），
-或用 `cuda::atomic_ref` 的 release store / acquire load。
+consumer 的 `data[]` 读发生在看到 `ready` 之后。这是一个**数据竞争（UB）**。
+
+**修正一个容易背错的公式：「producer 的 fence = release、consumer 的 fence = acquire」不能当
+机械等式用。** fence 不是贴在某行代码上的属性，它排的从来是「fence 前后的那批操作」——顺序由
+一套完整的**通信协议**给出：producer 侧「普通 store 排班 → `__threadfence()` 掐住 → 原子立旗」，
+consumer 侧对称地「原子读旗 → fence 掐住 → 普通 read」。三件缺一都拼不上：只 fence 不原子旗，
+旗本身有竞争（丢更新，见反例 0）；只原子旗不 fence，`data[]` 根本没被排进旗的「之前」；两个
+原语的作用域也要能对上（至少双方都有 device 及以上）。指南重构版 §5.7.5 给的就是这个
+message-passing 形状。等价性来自「fence + 原子旗」的**组合**，不来自名字像。
+
+**现代写法：把顺序直接写进原子本身（更难拼错）**——
+
+```cpp
+// scope 取 device（与默认 intrinsic 等价），order 显式给出
+cuda::atomic_ref<int, cuda::thread_scope_device> ready_ref(ready);
+// producer：写完 data[] 后立旗（release）——本机 SASS：MEMBAR.ALL.GPU + 原子/ST.E
+ready_ref.store(1, cuda::memory_order_release);
+// consumer：acquire 读旗，看到 1 才读 data[]——本机 SASS：LD.E + CCTL.IVALL（不是栅栏）
+while (ready_ref.load(cuda::memory_order_acquire) == 0) { /* 有界，见下 */ }
+```
+
+fence 版本与这一版本在本机已核对到 SASS 层（**04 篇「观察 3.5」的 order×scope 矩阵**）：
+release-acquire 的落点与「fence 三件套」等价、且不用绕常规栅栏。写新代码优先这种写法；
+维护老代码时也按「排班-掐住-立旗」整套理解，别逐句背公式。
 
 **更要命的坑：跨 block（或跨 grid）自旋等旗，可能永远等不到。**
 CUDA **不保证**不同 block 同时驻留，更不保证两个 grid 同时在跑（见域 2）。设想 consumer 先被
@@ -120,6 +243,9 @@ CUDA **不保证**不同 block 同时驻留，更不保证两个 grid 同时在�
 
 ### 反例 2（确定性、当场翻车）：把 `float` 位模式当 `int` 用 `atomicMax`
 
+> 验证维度：**表示与比较**（位模式序 ≠ 浮点数值序——找 max 的逻辑写错了，不是原子没起作用；
+> 可与反例 0/1 对照：那次是"原子性缺失"，这次原子性完好，错的是拿什么当"大小"比）。
+
 流行技巧是「浮点没有 `atomicMax`，那就把 `float` 重新解释成 `int` 再 `atomicMax`」。它对
 **非负** 浮点碰巧成立（IEEE-754 正数的位模式随数值单调），但**两个负数就错**：
 
@@ -144,12 +270,45 @@ atomicMax((int*)out, __float_as_int(v));   // 想当然
 requires .u32 or .s32 or .u64 or .s64 or .f16 or .f16x2 or .bf16 or .bf16x2 type`。所以
 「浮点原子 max」本来就得自己用 `atomicCAS` 构造。`atomicCAS` 是**通用原子**，可自建任意 RMW，代价是在冲突下自旋重试。）
 
-> `proper_fmax` 的循环是 `do { assumed = old; old = atomicCAS(p, assumed, __float_as_int(fmaxf(v, assumed_float))); } while (assumed != old);`：
-> 只有当别的线程在你重算期间又改过 `p`，`atomicCAS` 才会失败、让你重读重算。对这种「只增不减」的
-> `max`，每次成功写回都把值推向新的最大值，而可能取值有限，所以循环会收敛。不过在极端冲突下，
-> 某个线程可能被反复插队而长时间重试——活锁是所有 CAS 循环的通用风险，不是本例特有。
+### atomicCAS 循环逐步读
+
+反例 2 里那句"正确写法"的 `atomicCAS` 循环值得单独拆开——它是本篇唯一的**通用自建 RMW**：
+
+```
+        ┌─ ① 读旧值 ── assumed = *p（「动手前，我以为它还是它」）
+        │
+        ├─ ② 算候选 ── new = f(assumed)（这里 f = max(given, assumed)）
+        │
+        ├─ ③ 提交 ── old = atomicCAS(p, assumed, new)
+        │           语义：*p 仍是 assumed ⇒ 写入 new（成功）
+        │                 *p 已被别人换了 ⇒ 什么都不写（失败）
+        │                 返回值永远是「提交瞬间 *p 的值」
+        │
+        └─ ④ 裁决 ── old == assumed ⇒ 成功，退出
+                    old != assumed ⇒ 失败；返回值恰好是「插队者写下的值」
+                    ⇒ 让 assumed ← old（直接拿到最新情报，少一次重读）→ 回 ②
+```
+
+几个非显然的要点：
+
+- **CUDA 的 `atomicCAS` 不区分成败**：一律返回「提交瞬间 `*p` 的旧值」，成功与否要自己拿它和
+  `assumed` 比（成功 ⇔ 没人插队 ⇔ 旧值还是期望值）。libcu++ 的
+  `cuda::atomic_ref::compare_exchange_strong(expected, desired, …)` 才是"返回 bool、失败时
+  自动把 `expected` 更新为当前值"的接口——就是上面 ④ 的自动化。
+- **何时收敛**：对"候选只朝一个方向走"的 RMW（max 只增、计数只加、min 只减），每次成功提交都把
+  `*p` 推离可反复抢的状态，取值范围有限，循环必然终结。**通用 RMW 没有单调性**，极端冲突下某线程
+  可能长期反复插队（活锁）——这是所有 CAS 循环的通用风险，不是本例特有。
+- **ABA 风险**：CAS 只比对"值"，不比对"历史"。若 `*p` 从 A 被改成 B 又改回 A,循环照样当
+  "没变"提交成功。本篇的 max/计数类例子都是值单调的整数/位模式,ABA 无害;但在指针、双步更新、
+  带版本号的场景（域 11/12 的对象）里它是经典陷阱,CUDA 没有 LL/SC,只能靠补版本号或换结构规避。
+- **失败≠空闲**:CAS 失败的线程通常立刻重试,极端竞争下和自旋一样烧 SM 时间——这是
+  "shared 原子便宜、global 原子贵"之外的第二笔账:**竞争强度**,不只是落点。
+  （属成本直觉,不做定量基准;计数类证据见观察 4。）
+
 
 ### 反例 0（底座）：「`x = x + 1` 看起来像一条原子写」
+
+> 验证维度：**原子性**（RMW 完整性）——最基本的"这一步不能被拆"。
 
 源码一行，汇编是 load + add + store 三步。本机 256 线程 ×2000 次：预期 512000，非原子版只剩
 **2000**（丢 510000）。原子性不是「编译器会自动帮我做对」。
@@ -190,6 +349,14 @@ cmd /c "call `"$vcvars`" && `"$nvcc`" -arch=sm_90 -cubin -o `"$out\atomics_b128_
 
 `run_props.txt`：`RTX 4060 Laptop GPU`，compute capability **8.9**，warpSize 32，
 SM 数 24，L2 **32 MiB**。
+
+> **本节通用标签（适用于观察 2/3 的全部表格）**：
+> ① 均为**本机 sm_89 观察**（编译参数见 §复现步骤），是"这台机器这份编译器是这样"的**实现证据**，
+>   不是跨架构承诺；换 arch/flag/编译器版本都可能变（域 07 的"怎么读反汇编"就是为此）。
+> ② **SASS 里的 `STRONG` 字样不要拿来反推 CUDA memory order**：本机 relaxed 与 acquire 的原子
+>   指令同带 `.STRONG`（后者的排序来自随行的 `MEMBAR`/`CCTL.IVALL`，证据在 04 篇「观察 3.5」）。
+>   SASS 助记符是硬件层的属性标签，与语言层 order 名字并无一一对应。
+> ③ 表格只枚举函数级可复现的落点；PTX 还会随优化级别改写（域 07）。
 
 ### 观察 2 — PTX：默认原子没有 order，scope 靠后缀
 
@@ -239,6 +406,9 @@ SM 数 24，L2 **32 MiB**。
 | 原子性 `atomicity` | 512000 | 非原子 2000（丢 510000）；`atomicAdd` 512000 |
 | 共享竞争 `race-naive` | 8192 | **256** |
 | 共享竞争 `race-atomic` | 8192 | 8192 |
+
+> racecheck 旁证（2026-10-12，解锁后）：`race-naive` 报 hazard（点名 `atomics_lab.cu:43` 的
+> 读写对），`race-atomic` 0 hazard——见观察 5。
 | 浮点 max `floatmax` | -3.0 | naive **-5.0（WRONG）**；CAS+fmaxf -3.0 |
 | 发布 `publish 0 200` / `publish 1 200` / `publish 0 2000` | 0 | **badRounds=0**（三组全部）；无反例——静默 UB；自旋有界，若等不到会额外打印 `timeouts=…` |
 | 边界 `b128_sm89` | 编译失败 | `error: no instance of overloaded function "atomicAdd" matches … (float4 *, float4)` |
@@ -258,9 +428,32 @@ SM 时间。（`atomics_lab.cu` 注释里写的 「~0.1-1 s」 与之相符。�
 `publish 1 200` 也会显示 ~1.2 s。）也就是说，超时分支在本机**只在没有 producer 时**才会走到，
 本实验**从未主动构造**「consumer 占满 SM、producer 启不来」的真死锁场景（那会永远等，故不做）。
 
-### 观察 5 — compute-sanitizer：本机**不可用**（环境限制）
+### 观察 5 — compute-sanitizer（2026-10-12 更新：已解锁，本域反例拿到工具证据）
 
-`E:\NVIDIA\CUDA\v12.8\compute-sanitizer\compute-sanitizer.exe`（2025.1.0）反复报：
+> **2026-10-11/12 更新**：此前长期"注入失败"的根因已查明——**Windhawk**（进程级 mod 注入平台）
+> 与 sanitizer 的注入在 ntdll 撞车；停 Windhawk 服务后全部工具正常（细节与排查路径见 00 篇
+> 「不承诺」与过程记忆 `tmp/docs/memory/windows-toolchain-pitfalls.md`）。**重启后自启**，
+> 跑 sanitizer 前需再停——2026-10-12 的 racecheck 就是重新停过一次才跑成的。
+
+解锁后本域补跑（产物 `tmp/outputs/sanitizer-2026-10-12/`）：
+
+```
+compute-sanitizer --tool racecheck atomics_lab.exe race-naive
+  → Race reported between Read access at shared_counter_naive+0x80 (atomics_lab.cu:43)
+    ... 1 hazard displayed
+compute-sanitizer --tool racecheck atomics_lab.exe race-atomic
+  → RACECHECK SUMMARY: 0 hazards
+```
+
+**对照双方一边一条、一边干净**：`race-naive` 的丢失更新正是把非原子 RMW 拆成
+LDS/STS 呈现的读写对（工具直接点名 `atomics_lab.cu:43`），换成 `atomicAdd` 后同形状
+代码 0 hazard。反例 0 的功能数字（256 vs 8192）之外，第一次有了**独立于本机数值的工具判定**。
+同时这也校准了 racecheck 的适用范围：它看 **shared memory hazard**——本篇的
+`publish`（global 通信）不在它的视野里（04 篇已实测同一结论），那组反例的证据仍以
+PTX/SASS + 规范为准。
+
+（以下为**解锁前**的历史记录，保留作"工具装了 ≠ 能用"的现场存档：`sanitizer_smoke.cu` 在
+Windhawk 未停时同样报
 
 ```
 ========= COMPUTE-SANITIZER
@@ -268,18 +461,24 @@ SM 时间。（`atomics_lab.cu` 注释里写的 「~0.1-1 s」 与之相符。�
 ========= Error: Target application terminated before first instrumented API call
 ```
 
-**连一个 trivial 的 `cudaMalloc`+kernel 程序（`sanitizer_smoke.cu`）也一样**，`racecheck` /
-`synccheck` / `memcheck` 全部如此。已排除：路径、`--injection-path`、`--target-processes all`、
-`CUDA_INJECTION64_PATH`、复制到 CS 目录、改用 `cmd`/`Start-Process`。判断是**注入失败**：目标进程在
-第一个被插桩的 API 调用之前就退出了，插桩库没进去。文档里那条 Windows 前置注册表项
-`HKLM\SOFTWARE\NVIDIA Corporation\GPUDebugger\EnableInterface` **本机已是 `0x1`**（已核对，不是
-原因）；更深一层的排查（例如以管理员跑 `EnableDebuggerInterface.bat`）在**非管理员**会话里做不了
-（`reg add HKLM\...` 返回 *Access is denied*）。
-→ 本域**没有**拿到 racecheck 报告；竞争/可见性的证据改用 SASS/PTX（观察 2/3）。
+当时已排除路径/参数/注册表（`EnableInterface` 本机已是 `0x1`），怀疑方向含管理员与驱动，
+事后证实全部误判——真凶是 Windhawk 注入。这张表留着，作为"换台机器先跑 smoke 再下结论"的提醒。）
 
-> 顺带核对域 1：`tmp/outputs/EXP-0001/2026-10-08/racecheck-{sync,unsync}.txt` 里同样是上面那条
-> 注入失败信息——域 1 当时也没拿到 racecheck 报告。「本机 racecheck 跑不起来」是本项目的共同阻塞，
-> 任何「racecheck 通过」的说法都应先找到产物再下结论。
+### 观察 6 — `atomicAdd(float)` 的 `.FTZ`：与 `-ftz` 无关（原未决项实测，2026-10-12）
+
+`ftz_probe.cu`（`__global__ void k_ftz(float*, float) { atomicAdd(out, v); }`）同一源码用
+`-ftz=false` / `-ftz=true` 各编一次，SASS **完全相同**：
+
+```
+RED.E.ADD.F32.FTZ.RN.STRONG.GPU
+```
+
+PTX 两版同样是 `atom.global.add.f32`——**根本不带 ftz qualifier**。结论（本机 sm_89 观察）：
+浮点原子路径的 FTZ 是**指令形态固定的**，不受编译开关控制；这与普通浮点乘加的
+`FADD.F32.RN`（`-ftz` 控制是否变 `.FTZ`）不同。域 8 讲 FTZ 时要"分开输入/中间值/输出、
+分开指令路径"的提醒，在这里有了一个具体落点：**本机观察范围内，原子加的浮点路径固定 FTZ**，即使全局关掉
+FTZ 也一样。（顺带佐证：publish 实验的 `atomicAdd(double)` 是 `…F64.RN…`，
+double 无 FTZ 一族问题。）
 
 ### 产物清单
 
@@ -290,7 +489,10 @@ SM 时间。（`atomics_lab.cu` 注释里写的 「~0.1-1 s」 与之相符。�
 | `run_props.txt` / `run_atomicity.txt` / `run_floatmax.txt` / `run_publish_0_*.txt` / `run_race-*.txt` | 功能输出 |
 | `atomics_sass.ptx` / `atomics_sass.sass` / `atomics_lab.sass` | 指令级证据 |
 | `b128_sm89_build.log` / `b128_sm90_build.log` | 边界编译日志 |
-| `racecheck_*.txt` | sanitizer 失败记录 |
+| `racecheck_*.txt` | 解锁前的 sanitizer 失败记录（Windhawk 注入冲突，见观察 5） |
+
+> 解锁后的补充产物不在本目录：`tmp/outputs/sanitizer-2026-10-12/d05-*`（race-naive 的
+> racecheck 报告、race-atomic 干净对照、FTZ 双开关联测的 cubin/SASS/PTX）。
 | `refs/SOURCES.md` | 出处 URL |
 
 ## 出处
@@ -316,20 +518,22 @@ SM 时间。（`atomics_lab.cu` 注释里写的 「~0.1-1 s」 与之相符。�
 
 ## 未决
 
-- **compute-sanitizer 本机不可用**：注册表前置项 `GPUDebugger\EnableInterface` 本机已是 `0x1`，
-  但插桩库仍没进目标进程；非管理员会话无法进一步排查（管理员 `EnableDebuggerInterface.bat`）。
-  待补 `racecheck` 对本域「可见性/竞争」的独立确认。这是一条**需要复现的环境阻塞**。
+- **（已解决，2026-10-11/12）compute-sanitizer 本机不可用**：根因是 Windhawk 进程注入冲突（见
+  观察 5 更新）；本域已拿到 shared memory 竞争的 racecheck 证据。**遗留**：`publish` 是 global
+  广播竞争，racecheck 天生不查——它的独立判定仍缺工具层证据，见下一条。
 - **反例 1 未在本机复现**（0/2400）。要把它变成「跑得出错」的 litmus，需要跨 SM 的 store-buffer /
   message-passing 变体（域 4 的核心工具），本机尚未搭。当前判定依赖规范 + SASS/PTX。
 - **`publish` 的跨 grid 驻留问题未实测**：消费者已改为**有界自旋 + 超时报告**，本机已验证超时分支
   会正常返回（观察 4b）；但「consumer 先占住 SM、producer 永远启动不了」这一**真死锁**场景本机尚未构造
   （历史上 2400 轮全部在超时前收到旗子，本轮 200+200+2000 轮也是）。要复现，需要人为制造驻留压力
   （占满 SM 后再启动生产者）或换 cooperative launch 对照；这类实验会永远等，必须在外部计时守护下做。
-- **`ATOM…STRONG.GPU` 里 `STRONG` 与 relaxed/acquire 的精确对应**未厘清：本机 relaxed 与 acquire
-  的 ATOM 都显示 `.STRONG.GPU`，区别只在 `MEMBAR`/`CCTL.IVALL`。需要对照 `ld.relaxed` vs
-  `ld.acquire` 的 SASS 才能定论（可能属域 4/7）。
-- **`atomicAdd(float)` SASS 出现 `.FTZ`**（默认未开 `-ftz`）：是硬件对 float 原子固定 FTZ，还是
-  编译选择？待用 `-ftz=true/false` 对照确认（跨域 8）。
+- **（已解决，2026-10-11，04 篇「观察 3.5」）`ATOM…STRONG.GPU` 里 `STRONG` 与 relaxed/acquire 的
+  精确对应**：order×scope 矩阵已实测——本机 SASS 助记符的 `STRONG` 是硬件层属性、不与
+  memory order 一一对应（relaxed 原子同样 `STRONG`）；语义落点看随行的 `MEMBAR`/`CCTL.IVALL`。
+  本篇观察 2/3 的通用标签②即为此结论。
+- **（已解决，2026-10-12，观察 6）`atomicAdd(float)` SASS 出现 `.FTZ`**：与 `-ftz` 开关无关的
+  指令形态固定行为（PTX 层面即无 ftz qualifier）。仍是**本机 sm_89 观察**，其他架构未测。
 - **128-bit 原子（`.b128`）在 sm_90 的行为**未实测——本机无 sm_90，只证到「sm_89 编译失败」。
-- **浮点原子求和的可复现性**只在概念层（非结合），未做「同输入不同分块得不同低位」的最小实验。
+- **浮点原子求和的可复现性**只在概念层（非结合），未做「同输入不同分块得不同低位」的最小实验
+  （域 8 的位置）。
 - `_system` 原子的 system-scope 原子性附加条件（PTX §8.1.1）本机单卡不做实测。
